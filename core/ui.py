@@ -13,7 +13,6 @@ from __future__ import print_function
 import posix
 import pwd
 import re
-import socket  # socket.gethostname()
 import sys
 
 from asdl import const

@@ -1,6 +1,7 @@
-# Up-Stream Down-Stream Is-Feature
+# Up- Down-Stream [Is-Feature]
 upstream/master master
 upstream/master feature/ast-visitor-cli true
 upstream/master feature/dep-cli true
 
 master feature/ast-visitor-cli true
+upstream/release/0.6.pre6 features/ast-visitor-cli true

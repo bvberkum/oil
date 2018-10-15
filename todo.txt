@@ -1,0 +1,2 @@
+2018-10-15 TODO: cleanup asdl.shvisitor a bit more, get more complete tests going.
+2018-10-15 TODO: asdl.shvisitor.VarNameVisitor, not just global varnames but see about local scopes too
