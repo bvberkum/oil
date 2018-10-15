@@ -124,8 +124,15 @@ OSH_SPEC.ShortFlag('-i')  # interactive
 # TODO: -h too
 # the output format when passing -n
 OSH_SPEC.LongFlag('--ast-format',
-              ['text', 'abbrev-text', 'html', 'abbrev-html', 'oheap', 'none'],
+              ['text', 'abbrev-text', 'html', 'abbrev-html', 'oheap',
+                  'command-names', 'none'],
               default='abbrev-text')
+
+# Options for command-names to configure asdl.shvisitor:CmdNameVisitor
+OSH_SPEC.LongFlag('--exec-ignores', args.Str)
+OSH_SPEC.LongFlag('--exec-builtins', args.Str)
+OSH_SPEC.LongFlag('--exec-prefixes', args.Str)
+OSH_SPEC.LongFlag('--exec-vars', args.Str)
 
 OSH_SPEC.LongFlag('--print-status')  # TODO: Replace with a shell hook
 OSH_SPEC.LongFlag('--hijack-shebang')  # TODO: Implement this

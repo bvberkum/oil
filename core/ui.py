@@ -12,10 +12,13 @@ from __future__ import print_function
 
 import posix
 import pwd
+import re
+import socket  # socket.gethostname()
 import sys
 
 from asdl import const
 from asdl import format as fmt
+from asdl import shvisitor
 from core import dev
 from core.meta import runtime_asdl, syntax_asdl, Id
 from frontend import match
@@ -176,7 +179,7 @@ class Prompt(object):
     ret = []
     non_printing = 0
     for id_, value in tokens:
-      # BadBacklash means they should have escaped with \\, but we can't 
+      # BadBacklash means they should have escaped with \\, but we can't
       # make this an error.
       if id_ in (Id.PS_Literals, Id.PS_BadBackslash):
         ret.append(value)
@@ -317,6 +320,24 @@ def PrintAst(nodes, opts):
   if opts.ast_format == 'none':
     print('AST not printed.', file=sys.stderr)
 
+  elif opts.ast_format == 'command-names':
+    f = sys.stdout
+
+    ignores, prefixes, vars = [], [], []
+    re_sids = re.compile('[, ]')
+
+    if opts.exec_builtins:
+        shvisitor.CmdNameVisitor.builtins = re_sids.split(opts.exec_builtins)
+    if opts.exec_ignores:
+        ignores = re_sids.split(opts.exec_ignores)
+    if opts.exec_prefixes:
+        prefixes = re_sids.split(opts.exec_prefixes)
+    if opts.exec_vars:
+        vars = re_sids.split(opts.exec_vars)
+
+    v = shvisitor.CmdNameVisitor(ignores, prefixes, vars)
+    v.visit(node)
+
   else:  # text output
     f = sys.stdout
 
@@ -325,7 +346,7 @@ def PrintAst(nodes, opts):
     elif opts.ast_format in ('html', 'abbrev-html'):
       ast_f = fmt.HtmlOutput(f)
     else:
-      raise AssertionError
+      raise AssertionError, opts.ast_format
     abbrev_hook = (
         ast_lib.AbbreviateNodes if 'abbrev-' in opts.ast_format else None)
     tree = fmt.MakeTree(node, abbrev_hook=abbrev_hook)
