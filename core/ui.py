@@ -320,7 +320,6 @@ def PrintAst(nodes, opts):
     print('AST not printed.', file=sys.stderr)
 
   elif opts.ast_format == 'command-names':
-    f = sys.stdout
 
     ignores, prefixes, vars = [], [], []
     re_sids = re.compile('[, ]')
@@ -335,6 +334,11 @@ def PrintAst(nodes, opts):
         vars = re_sids.split(opts.exec_vars)
 
     v = shvisitor.CmdNameVisitor(ignores, prefixes, vars)
+    v.visit(node)
+
+  elif opts.ast_format == 'var-names':
+
+    v = shvisitor.VarNameVisitor()
     v.visit(node)
 
   else:  # text output

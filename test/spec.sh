@@ -270,17 +270,17 @@ word-eval() {
 
 assign() {
   sh-spec spec/assign.test.sh --osh-failures-allowed 2 \
-    ${REF_SHELLS[@]} $OSH_LIST "$@" 
+    ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 background() {
   sh-spec spec/background.test.sh \
-    ${REF_SHELLS[@]} $OSH_LIST "$@" 
+    ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 subshell() {
   sh-spec spec/subshell.test.sh \
-    ${REF_SHELLS[@]} $OSH_LIST "$@" 
+    ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 quote() {
@@ -509,7 +509,7 @@ errexit-strict() {
     ${REF_SHELLS[@]} $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
-# 
+#
 # Non-POSIX extensions: arrays, brace expansion, [[, ((, etc.
 #
 
@@ -536,7 +536,7 @@ type-compat() {
 # += is not POSIX and not in dash.
 append() {
   sh-spec spec/append.test.sh --osh-failures-allowed 2 \
-    $BASH $MKSH $OSH_LIST "$@" 
+    $BASH $MKSH $OSH_LIST "$@"
 }
 
 # associative array -- mksh and zsh implement different associative arrays.

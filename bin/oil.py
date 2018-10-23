@@ -125,7 +125,7 @@ OSH_SPEC.ShortFlag('-i')  # interactive
 # the output format when passing -n
 OSH_SPEC.LongFlag('--ast-format',
               ['text', 'abbrev-text', 'html', 'abbrev-html', 'oheap',
-                  'command-names', 'none'],
+                  'command-names', 'var-names', 'none'],
               default='abbrev-text')
 
 # Options for command-names to configure asdl.shvisitor:CmdNameVisitor

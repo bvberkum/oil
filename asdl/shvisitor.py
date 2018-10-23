@@ -42,7 +42,7 @@ class AstVisitor:
                 if v and isinstance(v, py_meta.CompoundObj):
                     self.visit(v)
 
-    def visitattr(self, node, attr):
+    def visititems(self, node, attr):
         for subnode in getattr(node, attr):
             self.visit(subnode)
 
@@ -73,7 +73,7 @@ class AstVisitor:
     #def visit_EscapedLiteralPart(self, node): pass
     #def visit_SingleQuotedPart(self, node): pass
     def visit_DoubleQuotedPart(self, node):
-        self.visitattr(node, 'parts')
+        self.visititems(node, 'parts')
     def visit_SimpleVarSub(self, node): pass
     #def visit_BracedVarSub(self, node): pass
     def visit_TildeSubPart(self, node):
@@ -90,8 +90,8 @@ class AstVisitor:
     #def visit_word(self, node): pass
     def visit_EmptyWord(self, node): pass
     #def visit_TokenWord(self, node): pass
-    def visit_CompoundWord(self, node): self.visitattr(node, 'parts')
-    def visit_BracedWordTree(self, node): self.visitattr(node, 'parts')
+    def visit_CompoundWord(self, node): self.visititems(node, 'parts')
+    def visit_BracedWordTree(self, node): self.visititems(node, 'parts')
     #def visit_StringWord(self, node): pass
     #def visit_lhs_expr_e(self, node): pass
     #def visit_lhs_expr(self, node): pass
@@ -133,20 +133,20 @@ class AstVisitor:
     #def visit_command_e(self, node): pass
     #def visit_command(self, node): pass
     #def visit_NoOp(self, node): pass
-    def visit_SimpleCommand(self, node): self.visitattr(node, 'words')
+    def visit_SimpleCommand(self, node): self.visititems(node, 'words')
     def visit_Sentence(self, node):
         self.visit(node.child)
         self.visit(node.terminator)
-    def visit_Assignment(self, node): self.visitattr(node, 'pairs')
+    def visit_Assignment(self, node): self.visititems(node, 'pairs')
     def visit_ControlFlow(self, node):
         pass #self.visit(token)
     def visit_Pipeline(self, node):
-        self.visitattr(node, 'children')
-    def visit_AndOr(self, node): self.visitattr(node, 'children')
+        self.visititems(node, 'children')
+    def visit_AndOr(self, node): self.visititems(node, 'children')
     #def visit_DoGroup(self, node): pass
     def visit_BraceGroup(self, node):
-        self.visitattr(node, 'children')
-        self.visitattr(node, 'redirects')
+        self.visititems(node, 'children')
+        self.visititems(node, 'redirects')
 
     #def visit_Subshell(self, node): pass
     #def visit_DParen(self, node): pass
@@ -156,14 +156,14 @@ class AstVisitor:
     #def visit_WhileUntil(self, node): pass
     #def visit_If(self, node): pass
     def visit_Case(self, node):
-        self.visitattr(node, 'arms')
-        self.visitattr(node, 'redirects')
+        self.visititems(node, 'arms')
+        self.visititems(node, 'redirects')
     def visit_FuncDef(self, node):
         self.visit(node.body)
-        self.visitattr(node, 'redirects')
+        self.visititems(node, 'redirects')
 
     #def visit_TimeBlock(self, node): pass
-    def visit_CommandList(self, node): self.visitattr(node, 'children')
+    def visit_CommandList(self, node): self.visititems(node, 'children')
     #def visit_glob_part_e(self, node): pass
     #def visit_glob_part(self, node): pass
     #def visit_GlobLit(self, node): pass
@@ -174,10 +174,23 @@ class AstVisitor:
 class VarNameVisitor(AstVisitor):
 
     """
-    XXX: retrieve variable names from AST.
-    Scan for names of variable. Default to filter out local vars.
-    Switch to include or show ony local. Will take some effort.
+    Retrieve variable names from AST.
+
+    TODO: Scan for names of variable. Default to filter out local vars.
+    Switch to include or show ony local, would take some more heuristics.
     """
+
+    prefix = 'print_'
+
+    def __init__(self):
+        AstVisitor.__init__(self, True, 'print_varname_')
+
+    def print_varname_SimpleVarSub(self, node):
+        print(node.token.val)
+
+    def print_varname_BracedVarSub(self, node):
+        print('$'+node.token.val)
+
 
 class CmdNameVisitor(AstVisitor):
 
@@ -202,8 +215,12 @@ class CmdNameVisitor(AstVisitor):
 
     prefix = 'print_'
     prefixes = "sudo time eval".split(' ')
-    builtins = "test set case if while read exec eval local export return "\
-            "continue echo printf which command".split(' ')
+    builtins = ". : [ alias bg bind break builtin caller cd command compgen "\
+"complete compopt continue declare dirs disown echo enable eval exec exit "\
+"export false fc fg getopts hash help history jobs kill let local logout "\
+"mapfile popd printf pushd pwd read readarray readonly return set shift shopt "\
+"source suspend test times trap true type typeset ulimit umask unalias unset "\
+"wait".split(' ')
     vars = []
 
     def __init__(self, ignores=None, prefixes=None, vars=None):

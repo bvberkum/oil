@@ -32,8 +32,10 @@ script:
     # Spec tests
     - test/spec.sh smoke
     # TODO: get other spec tests running on Travis.
-    # - test/spec.sh all
+    #- test/spec.sh all
+    # TODO: not sure where to place these system tests
     - bats test/osh-command-names-visitor-spec.bats
+    - bats test/osh-vars-names-visitor-spec.bats
 
 notifications:
     on_success: change

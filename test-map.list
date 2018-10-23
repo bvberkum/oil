@@ -1,0 +1,4 @@
+# Static test suite/source map
+travis test/travis-lint.do -- .travis.yml
+VarNameVisistor test/osh-var-names-visitor-spec.bats -- asdl/shvisitor.py core/ui.py
+CmdNameVisistor test/osh-command-names-visitor-spec.bats -- asdl/shvisitor.py core/ui.py

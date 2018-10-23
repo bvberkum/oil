@@ -4,26 +4,26 @@ load helper
 
 @test "ignore builtin 1" {
   run ./bin/osh -n --ast-format command-names -c "echo foo"
-  test_ok_empty
+  test_ok_empty || stdfail
 }
 
 @test "simple command 1" {
   run ./bin/osh -n --ast-format command-names -c "foo"
-  test_ok_nonempty "foo"
+  test_ok_nonempty "foo" || stdfail
 }
 
 @test "pathname command 1" {
   run ./bin/osh -n --ast-format command-names -c "/bin/foo"
-  test_ok_nonempty "/bin/foo"
+  test_ok_nonempty "/bin/foo" || stdfail 1
   run ./bin/osh -n --ast-format command-names -c "./foo"
-  test_ok_nonempty "./foo"
+  test_ok_nonempty "./foo" || stdfail 2
   run ./bin/osh -n --ast-format command-names -c "~/foo"
-  test_ok_nonempty "~/foo"
+  test_ok_nonempty "~/foo" || stdfail 3
 }
 
 @test "pipeline command 1" {
   run ./bin/osh -n --ast-format command-names -c "echo bar | foo"
-  test_ok_nonempty "foo"
+  test_ok_nonempty "foo" || stdfail
 }
 
 @test "subshell command 1" {
@@ -38,13 +38,13 @@ load helper
 
 @test "vars 2 - notations and prefixes" {
   run ./bin/osh -n --ast-format command-names --exec-vars '.*' -c "\$foo"
-  test_ok_nonempty "$foo"
+  test_ok_nonempty "$foo" || stdfail 1
   run ./bin/osh -n --ast-format command-names --exec-vars '.*' -c "\${foo}"
-  test_ok_nonempty "$foo"
+  test_ok_nonempty "$foo" || stdfail 2
   run ./bin/osh -n --ast-format command-names --exec-vars '.*' -c "sudo \$foo"
-  test_ok_nonempty "$foo"
+  test_ok_nonempty "$foo" || stdfail 3
   run ./bin/osh -n --ast-format command-names --exec-vars '.*' -c "sudo \${foo}"
-  test_ok_nonempty "$foo"
+  test_ok_nonempty "$foo" || stdfail 4
 
   run ./bin/osh -n --ast-format command-names --exec-vars '.*bar.*' -c "sudo \${foo}"
   test_ok_empty || stdfail 5
