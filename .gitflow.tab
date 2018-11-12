@@ -1,3 +1,6 @@
 # Up-Stream Down-Stream Is-Feature
 upstream/master master
+upstream/master feature/ast-visitor-cli true
+upstream/master feature/dep-cli true
+
 master feature/ast-visitor-cli true
