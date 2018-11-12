@@ -383,11 +383,16 @@ def OshCommandMain(argv):
     script_name = '<stdin>'
     f = sys.stdin
   else:
-    try:
-      f = open(script_name)
-    except IOError as e:
-      util.error("Couldn't open %r: %s", script_name, posix.strerror(e.errno))
-      return 2
+    if script_name == '-':
+      script_name = '<stdin>'
+      f = sys.stdin
+    else:
+      try:
+        f = open(script_name)
+      except IOError as e:
+        util.error("Error %s", e)
+        util.error("Couldn't open %r: %s", script_name, posix.strerror(e.errno))
+        return 2
 
   pool = alloc.Pool()
   arena = pool.NewArena()
