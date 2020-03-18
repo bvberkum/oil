@@ -1,38 +1,72 @@
-<!-- NOTE: This file is at /release/$VERSION/index.html -->
+---
+css_files: web/base.css web/release-index.css
+all_docs_url: -
+version_url: -
+---
 
-Oil Version 0.6.pre9
------------------
+Oil 0.8.pre2
+============
 
-### What's New
+<!-- NOTE: This file is published to /release/$VERSION/index.html -->
 
-- The [Release announcement](announcement.html) has a high-level summary of
-  changes.
-- Details are in the [raw git change log](changelog.html).  Some of these
-  changes may not affect the release tarball (e.g. tool changes).
+<span class="date">
+<!-- REPLACE_WITH_DATE -->
+</span>
 
-### Docs For End Users
+This is the home page for version 0.8.pre2 of Oil, a Unix shell.  To use it,
 
-- [INSTALL](doc/INSTALL.html).  How to install OSH.  This text file is also at
-  the root of the tarball.
-- [OSH Quick Reference](doc/osh-quick-ref.html), with Examples (in progress).
-  This document underlies the OSH `help` builtin.  It also gives a rough
-  overview of what features OSH implements.
+1. Download a source tarball.
+2. Build and install it, as described in [INSTALL][].
 
-### Docs For Developers
+These steps take 30 to 60 seconds on most machines.  After that, you can
+assemble an `oshrc` file, which is described in [the
+manual](doc/osh-manual.html).
 
-- [Github Wiki for oilshell/oil](https://github.com/oilshell/oil/wiki)
+Test results, metrics, and benchmarks are shown below.
 
-### Download
+[INSTALL]: doc/INSTALL.html
+
+## Download
 
 <!-- REPLACE_WITH_DOWNLOAD_LINKS -->
 
-### Metrics
+Note: `oil-native` is a **preview** release, not a working shell.
 
-- Lines of source, counted in differented ways:
-  - [oil-osh-cloc](metrics.wwz/line-counts/oil-osh-cloc.txt).  The core of Oil,
-    as measured by the [cloc][] tool.
+## What's New
+
+- Details are in the [raw git change log](changelog.html).  Not all changes
+  affect the release tarball.
+- I sometimes write a [release announcement](announcement.html) with a
+  high-level description of changes.
+
+## Documentation
+
+Oil has three major sources of docs:
+
+- The [Doc Overview](doc/) links to all other docs, including the Manual and
+  Oil Language Reference.  It's work in progress.  Up-to-date docs include:
+  - [INSTALL][]
+  - [OSH User Manual](doc/osh-manual.html)
+  - [Known Differences Between OSH and Other
+    Shells](doc/known-differences.html)
+  - [Egg Expressions (Oil Regexes)](doc/eggex.html)
+  - [JSON Support](doc/json.html)
+  - [Simple Word Evaluation](doc/simple-word-eval.html)
+  - [Quirks](doc/quirks.html)
+- [Github Wiki for oilshell/oil](https://github.com/oilshell/oil/wiki)
+  - The [Oil Deployments](https://github.com/oilshell/oil/wiki/Oil-Deployments)
+    wiki page has other ways of getting Oil.  These versions may not be
+    up-to-date.
+
+## Metrics
+
+- Lines of source, counted in different ways:
+  - [osh-cloc](metrics.wwz/line-counts/osh-cloc.txt).  OSH and common
+    libraries, as measured by the [cloc][] tool.
   - [src](metrics.wwz/line-counts/src.txt).  The whole Oil repo organized by
     type of source file.
+  - [oil-cpp](metrics.wwz/line-counts/oil-cpp.txt).  The C++ code in the
+    `oil-native` tarball.
   - [OPy](metrics.wwz/line-counts/opy.txt).  How much code is in the OPy
     toolchain?
 - Lines of dependencies:
@@ -48,49 +82,64 @@ Oil Version 0.6.pre9
     compiled with CPython (for comparison).
   - [src-bin-ratio-with-opy](metrics.wwz/bytecode/src-bin-ratio-with-opy.txt) -
     How big is the compiled output?
-- Native Code Metrics
-  - [overview](metrics.wwz/native-code/overview.txt) - An analysis of GCC's
+- OVM / CPython
+  - [overview](metrics.wwz/ovm/overview.txt) - An analysis of GCC's
     compilation of [OVM][] (a subset of CPython).  [Bloaty][] provides the
     underlying data.
   - [cpython-defs/overview](metrics.wwz/cpython-defs/overview.txt) - We try to
     ship as little of CPython as possible, and this is what's left.
+- `oil-native`.  The future of Oil is pure native code.
+  - [overview](metrics.wwz/oil-native/overview.txt) - Binary code size reported
+    by [Bloaty][].
 
 [cloc]: https://github.com/AlDanial/cloc
 [Bloaty]: https://github.com/google/bloaty
 [OVM]: //www.oilshell.org/cross-ref.html?tag=OVM#OVM
 
+## Tests
 
-### Oil Tests
+### Main Test Suites
 
-- [Spec Tests](test/spec.wwz/).  Test OSH behavior against that of existing
-  shells.
-- [Wild Tests](test/wild.wwz/).  Parsing and translating thousands of shell
-  scripts with OSH.
+- [Oil Spec Tests](test/spec.wwz/oil.html).  Test new Oil language features.
+- [OSH Spec Tests](test/spec.wwz/osh.html).  Test OSH with existing shells, and
+  compare their behavior.
+- [Wild Tests](test/wild.wwz/).  Parse and translate thousands of shell scripts
+  with OSH.
 - [Unit Tests](test/unit.wwz/).  Python unit test results.
 
-More tests:
+### Other Suites
 
-- [Gold Tests](test/other.wwz/gold.txt).  Comparisons against bash (using
+- [Gold Tests](test/other.wwz/gold.txt).  Compare OSH against bash (using
   implicit assertions, no golden output.)
 - [osh2oil Tests](test/other.wwz/osh2oil.txt).  Test the conversion of OSH to
   Oil.
 - [parse-errors](test/other.wwz/parse-errors.txt).  A list of all parse errors.
-- [runtime-errors](test/other.wwz/runtime-errors.txt).  A list of all runtime
+  - [parse-errors-oil-native](test/other.wwz/parse-errors-oil-native.txt).
+    With the native binary.
+- [runtime-errors](test/other.wwz/runtime-errors.txt).  A list of shell runtime
   errors.
+- [oil-runtime-errors](test/other.wwz/oil-runtime-errors.txt).  Oil language
+  runtime errors.
 - [arena](test/other.wwz/arena.txt).  Testing an invariant for the parser.
 - [osh-usage](test/other.wwz/osh-usage.txt).  Misc tests of the `osh` binary.
 - [oshc-deps](test/other.wwz/oshc-deps.txt).  Tests for a subcommand in
   progress.
 - [opyc](test/other.wwz/opyc.txt).  Tests for the opyc tool.
+- [Smoosh][] test suite (from [mgree/smoosh][]):
+  - [smoosh](test/spec.wwz/smoosh.html)
+  - [smoosh-hang](test/spec.wwz/smoosh-hang.html)
 
-### OPy Tests
+[Smoosh]: http://shell.cs.pomona.edu/
+
+[mgree/smoosh]: https://github.com/mgree/smoosh/tree/master/tests/shell
+
+### For OPy
 
 The OPy compiler is used to compile Oil to bytecode, but isn't itself part of
 the release.
 
 - [build-oil-repo](test/opy.wwz/build-oil-repo.txt)
 - [test-gold](test/opy.wwz/test-gold.txt)
-- [test-oil-unit-byterun](test/opy.wwz/test-oil-unit-byterun.txt)
 - [regtest-compile](test/opy.wwz/regtest-compile.txt)
 - [regtest-verify-golden](test/opy.wwz/regtest-verify-golden.txt)
 
@@ -103,7 +152,7 @@ Tree-shaking:
 
 - [ ] Test build and install on OS X
 
-### Benchmarks
+## Benchmarks
 
 - [OSH Parser Performance](benchmarks.wwz/osh-parser/).  How fast does OSH
   parse compared to other shells?
@@ -113,6 +162,24 @@ Tree-shaking:
   shells use at startup?
 - [OVM Build](benchmarks.wwz/ovm-build/).  How long does it take for end users
   to build Oil?  How big is the resulting binary?
+
+## Source Code
+
+These files may help you understand how Oil is implemented, i.e. with
+domain-specific languages and code generation.
+
+- [_devbuild/gen/id.h](source-code.wwz/_devbuild/gen/id.h). A list of language
+  elements, used in the lexer and in multiple parsers and evaluators.
+- The regex-based lexer uses two stages of code generation:
+  - [frontend/lexer_def.py](source-code.wwz/frontend/lexer_def.py)
+  - [_devbuild/tmp/osh-lex.re2c.h](source-code.wwz/_devbuild/tmp/osh-lex.re2c.h)
+  - [_devbuild/gen/osh-lex.h](source-code.wwz/_devbuild/gen/osh-lex.h)
+- [frontend/syntax.asdl](source-code.wwz/frontend/syntax.asdl). The syntax tree
+  for OSH and Oil.
+- [oil_lang/grammar.pgen2](source-code.wwz/oil_lang/grammar.pgen2). The
+  expression grammar for Oil.  In contrast, the OSH parsers are hand-written.
+
+Also see the [oilshell/oil](https://github.com/oilshell/oil) repository.
 
 <!-- - [OHeap](benchmarks.wwz/oheap/).  Metrics for a possible AST encoding format. -->
 

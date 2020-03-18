@@ -2,6 +2,36 @@
 #
 # Demo of traps.
 
+sigint-batch() {
+  trap 'echo [got SIGINT]' INT
+  echo "Registered SIGINT trap.  Run 'kill -INT $$' to see a message."
+  sleep 5
+}
+
+sigterm-batch() {
+  trap 'echo [got SIGTERM]' TERM
+  echo "Registered SIGTERM trap.  Run 'kill -TERM $$' to see a message."
+  sleep 5
+}
+
+# BUG: OSH gets two sigterms?
+sigterm-then-kill-test() {
+  local sh=${1:-bash}
+  #### SIGTERM trap should run upon 'kill'
+  $sh -c 'echo "> PID $$ started";
+    echo $$ > _tmp/pid.txt;
+    trap "echo SIGTERM" TERM;
+    sleep 1;
+    echo "< PID $$ done"' &
+
+  sleep 0.5
+  local pid=$(cat _tmp/pid.txt)
+  echo "killing $pid"
+  kill -TERM $pid
+  wait
+  echo status=$?
+}
+
 sigterm() {
   echo "sigterm [$@] $?"
   # quit the process -- otherwise we resume!

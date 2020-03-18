@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 # Copyright 2016 Andy Chu. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,46 +30,41 @@ UNARY_OP: -z -n, etc.
 BINARY_OP: -gt, -ot, ==, etc.
 """
 
-from osh import word
-from core import util
-from core.meta import Id, Kind, LookupKind, syntax_asdl, types_asdl
+from _devbuild.gen.id_kind_asdl import Id, Kind
+from _devbuild.gen.types_asdl import lex_mode_t, lex_mode_e
+from _devbuild.gen.syntax_asdl import word_t, word_e, bool_expr, bool_expr_t
+from core.util import p_die
+from frontend import consts
+from osh import word_
 
-#try:
-#  import libc  # for regex_parse
-#except ImportError:
-#  from benchmarks import fake_libc as libc
+from typing import List, Optional, TYPE_CHECKING
+if TYPE_CHECKING:
+  from osh.word_parse import WordEmitter
 
-bool_expr = syntax_asdl.bool_expr
-word_e = syntax_asdl.word_e
-lex_mode_e = types_asdl.lex_mode_e
-
-log = util.log
-p_die = util.p_die
+# import libc  # for regex_parse
 
 
 class BoolParser(object):
   """Parses [[ at compile time and [ at runtime."""
 
   def __init__(self, w_parser):
-    """
-    Args:
-      w_parser: WordParser
-    """
+    # type: (WordEmitter) -> None
     self.w_parser = w_parser
     # Either one word or two words for lookahead
-    self.words = []
+    self.words = []  # type: List[word_t]
 
-    self.cur_word = None
+    self.cur_word = None  # type: Optional[word_t]
     self.op_id = Id.Undefined_Tok
     self.b_kind = Kind.Undefined
 
   def _NextOne(self, lex_mode=lex_mode_e.DBracket):
+    # type: (lex_mode_t) -> None
     n = len(self.words)
     if n == 2:
       assert lex_mode == lex_mode_e.DBracket
       self.words[0] = self.words[1]
       self.cur_word = self.words[0]
-      del self.words[1]
+      self.words.pop()
     elif n in (0, 1):
       w = self.w_parser.ReadWord(lex_mode)  # may raise
       if n == 0:
@@ -79,12 +74,13 @@ class BoolParser(object):
       self.cur_word = w
 
     assert self.cur_word is not None
-    self.op_id = word.BoolId(self.cur_word)
-    self.b_kind = LookupKind(self.op_id)
+    self.op_id = word_.BoolId(self.cur_word)
+    self.b_kind = consts.GetKind(self.op_id)
     #log('--- word %s', self.cur_word)
     #log('op_id %s %s %s', self.op_id, self.b_kind, lex_mode)
 
   def _Next(self, lex_mode=lex_mode_e.DBracket):
+    # type: (lex_mode_t) -> None
     """Advance to the next token, skipping newlines.
 
     We don't handle newlines in the lexer because we want the newline after ]]
@@ -97,15 +93,17 @@ class BoolParser(object):
         break
 
   def _LookAhead(self):
+    # type: () -> word_t
     n = len(self.words)
     if n != 1:
-      raise AssertionError(self.words)
+      raise AssertionError(n)
 
     w = self.w_parser.ReadWord(lex_mode_e.DBracket)  # may raise
     self.words.append(w)  # Save it for _Next()
     return w
 
   def Parse(self):
+    # type: () -> bool_expr_t
     self._Next()
 
     node = self.ParseExpr()
@@ -117,21 +115,24 @@ class BoolParser(object):
     return node
 
   def _TestAtEnd(self):
+    # type: () -> bool
     """For unit tests only."""
     return self.op_id == Id.Lit_DRightBracket
 
   def ParseForBuiltin(self):
+    # type: () -> bool_expr_t
     """For test builtin."""
     self._Next()
 
     node = self.ParseExpr()
     if self.op_id != Id.Eof_Real:
-      p_die('Unexpected trailing word in test expression: %s',
-            self.cur_word, word=self.cur_word)
+      p_die('Unexpected trailing word %s', word_.Pretty(self.cur_word),
+          word=self.cur_word)
 
     return node
 
   def ParseExpr(self):
+    # type: () -> bool_expr_t
     """
     Iterative:
     Expr    : Term (OR Term)*
@@ -149,6 +150,7 @@ class BoolParser(object):
       return left
 
   def ParseTerm(self):
+    # type: () -> bool_expr_t
     """
     Term    : Negated (AND Negated)*
 
@@ -165,6 +167,7 @@ class BoolParser(object):
       return left
 
   def ParseNegatedFactor(self):
+    # type: () -> bool_expr_t
     """
     Negated : '!'? Factor
     """
@@ -176,6 +179,7 @@ class BoolParser(object):
       return self.ParseFactor()
 
   def ParseFactor(self):
+    # type: () -> bool_expr_t
     """
     Factor  : WORD
             | UNARY_OP WORD
@@ -188,21 +192,23 @@ class BoolParser(object):
       self._Next()
       w = self.cur_word
       # e.g. [[ -f < ]].  But [[ -f '<' ]] is OK
-      if w.tag not in (word_e.CompoundWord, word_e.StringWord):
+
+      tag = w.tag_()
+      if tag != word_e.Compound and tag != word_e.String:
         p_die('Invalid argument to unary operator', word=w)
       self._Next()
-      node = bool_expr.BoolUnary(op, w)
+      node = bool_expr.Unary(op, w)  # type: bool_expr_t
       return node
 
     if self.b_kind == Kind.Word:
       # Peek ahead another token.
       t2 = self._LookAhead()
-      t2_op_id = word.BoolId(t2)
-      t2_b_kind = LookupKind(t2_op_id)
+      t2_op_id = word_.BoolId(t2)
+      t2_b_kind = consts.GetKind(t2_op_id)
 
       #log('t2 %s / t2_op_id %s / t2_b_kind %s', t2, t2_op_id, t2_b_kind)
-      # Redir pun for < and >, -a and -o pun
-      if t2_b_kind in (Kind.BoolBinary, Kind.Redir):
+      # Op for < and >, -a and -o pun
+      if t2_b_kind == Kind.BoolBinary or t2_op_id in (Id.Op_Less, Id.Op_Great):
         left = self.cur_word
 
         self._Next()
@@ -220,11 +226,11 @@ class BoolParser(object):
         if is_regex:
           # NOTE: StaticEval for checking regex syntax isn't enough.  We could
           # need to pass do_ere so that the quoted parts get escaped.
-          #ok, s, unused_quoted = word.StaticEval(right)
+          #ok, s, unused_quoted = word_.StaticEval(right)
           pass
 
         self._Next()
-        return bool_expr.BoolBinary(op, left, right)
+        return bool_expr.Binary(op, left, right)
       else:
         # [[ foo ]]
         w = self.cur_word
@@ -235,7 +241,8 @@ class BoolParser(object):
       self._Next()
       node = self.ParseExpr()
       if self.op_id != Id.Op_RParen:
-        p_die('Expected ), got %s', self.cur_word, word=self.cur_word)
+        p_die('Expected ), got %s', word_.Pretty(self.cur_word),
+              word=self.cur_word)
       self._Next()
       return node
 

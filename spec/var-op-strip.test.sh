@@ -15,8 +15,8 @@ a=(1a 2a 3a)
 argv.py ${a[@]%a}
 ## stdout: ['1', '2', '3']
 ## status: 0
-## N-I dash/mksh stdout-json: ""
-## N-I dash status: 2
+## N-I dash/mksh/ash stdout-json: ""
+## N-I dash/ash status: 2
 ## N-I mksh status: 1
 
 #### Remove const suffix is vectorized on $@ array
@@ -24,8 +24,8 @@ set -- 1a 2a 3a
 argv.py ${@%a}
 ## stdout: ['1', '2', '3']
 ## status: 0
-## N-I dash stdout: ['1a', '2a', '3']
-## N-I dash status: 0
+## N-I dash/ash stdout: ['1a', '2a', '3']
+## N-I dash/ash status: 0
 ## N-I mksh stdout-json: ""
 ## N-I mksh status: 1
 
@@ -63,9 +63,17 @@ echo ${v%[[:alpha:]]}
 # NOTE: LANG is set to utf-8.
 v='μ-'
 echo ${v#?}  # ? is a glob that stands for one character
-## stdout: -
-## BUG dash/mksh stdout-repr: '\xbc-\n'
-## BUG zsh stdout-repr: '\n'
+echo ${v##?}
+v='-μ'
+echo ${v%?}  # ? is a glob that stands for one character
+echo ${v%%?}
+## STDOUT:
+-
+-
+-
+-
+## BUG dash/mksh/ash stdout-repr: '\xbc-\n\xbc-\n-\xce\n-\xce\n'
+## BUG zsh stdout-repr: '\n\n\n\n'
 
 #### Bug fix: Test that you can remove everything with glob
 s='--x--'
@@ -91,8 +99,8 @@ argv.py ${array[@]/#/prefix-}
 ## STDOUT:
 ['prefix-aa', 'prefix-bb', 'prefix-']
 ## END
-## N-I dash status: 2
-## N-I dash stdout-json: ""
+## N-I dash/ash status: 2
+## N-I dash/ash stdout-json: ""
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
 
@@ -102,7 +110,191 @@ argv.py ${array[@]/%/-suffix}
 ## STDOUT:
 ['aa-suffix', 'bb-suffix', '-suffix']
 ## END
-## N-I dash status: 2
-## N-I dash stdout-json: ""
+## N-I dash/ash status: 2
+## N-I dash/ash stdout-json: ""
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
+
+#### strip unquoted and quoted [
+# I guess dash and mksh treat unquoted [ as an invalid glob?
+var='[foo]'
+echo ${var#[}
+echo ${var#"["}
+echo "${var#[}"
+echo "${var#"["}"
+## STDOUT:
+foo]
+foo]
+foo]
+foo]
+## END
+## OK dash/mksh STDOUT:
+[foo]
+foo]
+[foo]
+foo]
+## END
+## BUG zsh stdout-json: ""
+## BUG zsh status: 1
+
+#### strip unquoted and quoted []
+# LooksLikeGlob('[]') is true
+# I guess dash, mksh, and zsh treat unquoted [ as an invalid glob?
+var='[]foo[]'
+echo ${var#[]}
+echo ${var#"[]"}
+echo "${var#[]}"
+echo "${var#"[]"}"
+## STDOUT:
+foo[]
+foo[]
+foo[]
+foo[]
+## END
+## OK dash/mksh/zsh STDOUT:
+[]foo[]
+foo[]
+[]foo[]
+foo[]
+## END
+
+#### strip unquoted and quoted ?
+var='[foo]'
+echo ${var#?}
+echo ${var#"?"}
+echo "${var#?}"
+echo "${var#"?"}"
+## STDOUT:
+foo]
+[foo]
+foo]
+[foo]
+## END
+
+#### strip unquoted and quoted [a]
+var='[a]foo[]'
+echo ${var#[a]}
+echo ${var#"[a]"}
+echo "${var#[a]}"
+echo "${var#"[a]"}"
+## STDOUT:
+[a]foo[]
+foo[]
+[a]foo[]
+foo[]
+## END
+
+#### Nested % and # operators (bug reported by Crestwave)
+var=$'\n'
+argv.py "${var#?}"
+argv.py "${var%''}"
+argv.py "${var%"${var#?}"}"
+var='a'
+argv.py "${var#?}"
+argv.py "${var%''}"
+argv.py "${var%"${var#?}"}"
+## STDOUT:
+['']
+['\n']
+['\n']
+['']
+['a']
+['a']
+## END
+## N-I dash STDOUT:
+['\\n']
+['$\\n']
+['$']
+['']
+['a']
+['a']
+## END
+
+#### strip * (bug regression)
+x=abc
+argv.py "${x#*}"
+argv.py "${x##*}"
+argv.py "${x%*}"
+argv.py "${x%%*}"
+## STDOUT:
+['abc']
+['']
+['abc']
+['']
+## END
+## BUG zsh STDOUT:
+['abc']
+['']
+['ab']
+['']
+## END
+
+#### strip ?
+x=abc
+argv.py "${x#?}"
+argv.py "${x##?}"
+argv.py "${x%?}"
+argv.py "${x%%?}"
+## STDOUT:
+['bc']
+['bc']
+['ab']
+['ab']
+## END
+
+#### strip all
+x=abc
+argv.py "${x#abc}"
+argv.py "${x##abc}"
+argv.py "${x%abc}"
+argv.py "${x%%abc}"
+## STDOUT:
+['']
+['']
+['']
+['']
+## END
+
+#### strip none
+x=abc
+argv.py "${x#}"
+argv.py "${x##}"
+argv.py "${x%}"
+argv.py "${x%%}"
+## STDOUT:
+['abc']
+['abc']
+['abc']
+['abc']
+## END
+
+#### strip all unicode
+x=μabcμ
+echo "${x#?abc?}"
+echo "${x##?abc?}"
+echo "${x%?abc?}"
+echo "${x%%?abc?}"
+## STDOUT:
+
+
+
+
+## BUG dash/mksh/ash STDOUT:
+μabcμ
+μabcμ
+μabcμ
+μabcμ
+## END
+
+#### strip none unicode
+x=μabcμ
+argv.py "${x#}"
+argv.py "${x##}"
+argv.py "${x%}"
+argv.py "${x%%}"
+## STDOUT:
+['\xce\xbcabc\xce\xbc']
+['\xce\xbcabc\xce\xbc']
+['\xce\xbcabc\xce\xbc']
+['\xce\xbcabc\xce\xbc']
+## END

@@ -4,8 +4,16 @@
 #   ./cpython-defs.sh <function name>
 #
 # Example:
-#   ./cpython-defs.sh oil-py-names  # extract names
-#   ./cpython-defs.sh filter-methods
+#
+#   # make clean tree of .c files
+#   devtools/release.sh quick-oil-tarball
+#   build/test.sh oil-tar  # can Ctrl-C this
+#
+#   build/cpython-defs.sh oil-py-names  # extract names
+#   build/cpython-defs.sh filter-methods
+#
+# NOTE: 'build/compile.sh make-tar' is complex, so it's easier to just extract
+# the tarball, even though it leads to a weird dependency.
 
 set -o nounset
 set -o pipefail
@@ -95,26 +103,22 @@ extract-methods() {
     }
   }
 
-  {
-    if (printing) {
-      print
-    }
-  }
+  printing { print }
 
-  /^[:space:]*\}/ {
-    if (printing) {
-      # Print the edit list for #ifdef #endif.
-      line_end = FNR;
-      printf("%s %s %d %d\n", rel_path, def_name, line_begin, line_end) > edit_list;
-      printing = 0;
-    }
+  # Looking for closing brace (with leading space)
+
+  /^[:space:]*\}/ && printing {
+    # Print the edit list for #ifdef #endif.
+    line_end = FNR;
+    printf("%s %s %d %d\n", rel_path, def_name, line_begin, line_end) > edit_list;
+    printing = 0;
   }
 
   END {
     for (name in found) {
       num_found++;
     }
-    printf("extract-defs.awk: Found definitions in %d out of %d files\n",
+    printf("extract-methods.awk: Found definitions in %d out of %d files\n",
            num_found, ARGC) > "/dev/stderr";
   }
   ' "$@"
@@ -122,10 +126,14 @@ extract-methods() {
 
 source build/common.sh  # $PY27
 
-# TODO: Use PREPROC_FLAGS from build/compile.sh.
 preprocess() {
-  # What about stuff in pyconfig.h?
-  gcc -I $PY27 -E -D OVM_MAIN -
+  # TODO: Use PREPROC_FLAGS from build/compile.sh.
+  # - What about stuff in pyconfig.h?
+  # - Hack to define WTERMSIG!  We really need to include <sys/wait.h>, but
+  # that causes parse errors in cpython_defs.py.  Really we should get rid of
+  # this whole hack!
+  # - WIFSTOPPED is another likely thing...
+  gcc -I $PY27 -E -D OVM_MAIN -D WTERMSIG -
 }
 
 readonly TARBALL_ROOT=$(echo _tmp/oil-tar-test/oil-*)
@@ -144,6 +152,7 @@ cpython-defs() {
 filter-methods() {
   local tmp=$BASE_DIR
   mkdir -p $tmp
+
   extract-all-methods > $tmp/extracted.txt
   cat $tmp/extracted.txt | preprocess > $tmp/preprocessed.txt
 

@@ -91,6 +91,14 @@ pat="^(a b)$"
 ## OK zsh stdout: true
 ## OK zsh status: 0
 
+#### Mixing quoted and unquoted parts
+[[ 'a b' =~ 'a 'b ]] && echo true
+[[ "a b" =~ "a "'b' ]] && echo true
+## STDOUT:
+true
+true
+## END
+
 #### Regex with == and not =~ is parse error, different lexer mode required
 # They both give a syntax error.  This is lame.
 [[ '^(a b)$' == ^(a\ b)$ ]] && echo true
@@ -125,25 +133,133 @@ pat="^(a b)$"
 ## N-I zsh stdout-json: ""
 ## N-I zsh status: 1
 
-#### Unquoted { is parse error in bash/zsh
-[[ { =~ { ]] && echo true
-echo status=$?
-## STDOUT:
-status=2
-## END
-## N-I zsh STDOUT:
-status=1
-## END
+#### Regex to match literal brackets []
 
-#### Quoted {
-[[ { =~ "{" ]] && echo true
-echo status=$?
+# bash-completion relies on this, so we're making it match bash.
+# zsh understandably differs.
+[[ '[]' =~ \[\] ]] && echo true
+
+# Another way to write this.
+pat='\[\]'
+[[ '[]' =~ $pat ]] && echo true
 ## STDOUT:
 true
+true
+## END
+## OK zsh STDOUT:
+true
+## END
+
+#### Regex to match literals . ^ $ etc.
+[[ 'x' =~ \. ]] || echo false
+[[ '.' =~ \. ]] && echo true
+
+[[ 'xx' =~ \^\$ ]] || echo false
+[[ '^$' =~ \^\$ ]] && echo true
+
+[[ 'xxx' =~ \+\*\? ]] || echo false
+[[ '*+?' =~ \*\+\? ]] && echo true
+
+[[ 'xx' =~ \{\} ]] || echo false
+[[ '{}' =~ \{\} ]] && echo true
+## STDOUT:
+false
+true
+false
+true
+false
+true
+false
+true
+## END
+## BUG zsh STDOUT:
+true
+false
+false
+false
+## END
+## BUG zsh status: 1
+
+#### Unquoted { is a regex parse error
+[[ { =~ { ]] && echo true
+echo status=$?
+## stdout-json: ""
+## status: 2
+## BUG bash stdout-json: "status=2\n"
+## BUG bash status: 0
+## BUG zsh stdout-json: "status=1\n"
+## BUG zsh status: 0
+
+#### Fatal error inside [[ =~ ]]
+
+# zsh and osh are stricter than bash.  bash treats [[ like a command.
+
+[[ a =~ $(( 1 / 0 )) ]]
+echo status=$?
+## stdout-json: ""
+## status: 1
+## BUG bash stdout: status=1
+## BUG bash status: 0
+
+#### Quoted { and +
+[[ { =~ "{" ]] && echo 'yes {'
+[[ + =~ "+" ]] && echo 'yes +'
+[[ * =~ "*" ]] && echo 'yes *'
+[[ ? =~ "?" ]] && echo 'yes ?'
+[[ ^ =~ "^" ]] && echo 'yes ^'
+[[ $ =~ "$" ]] && echo 'yes $'
+[[ '(' =~ '(' ]] && echo 'yes ('
+[[ ')' =~ ')' ]] && echo 'yes )'
+[[ '|' =~ '|' ]] && echo 'yes |'
+[[ '\' =~ '\' ]] && echo 'yes \'
+echo ---
+
+[[ . =~ "." ]] && echo 'yes .'
+[[ z =~ "." ]] || echo 'no .'
+echo ---
+
+# This rule is weird but all shells agree.  I would expect that the - gets
+# escaped?  It's an operator?  but it behaves like a-z.
+[[ a =~ ["a-z"] ]]; echo "a $?"
+[[ - =~ ["a-z"] ]]; echo "- $?"
+[[ b =~ ['a-z'] ]]; echo "b $?"
+[[ z =~ ['a-z'] ]]; echo "z $?"
+
+echo status=$?
+## STDOUT:
+yes {
+yes +
+yes *
+yes ?
+yes ^
+yes $
+yes (
+yes )
+yes |
+yes \
+---
+yes .
+no .
+---
+a 0
+- 1
+b 0
+z 0
 status=0
 ## END
 ## N-I zsh STDOUT:
-status=1
+yes ^
+yes $
+yes )
+yes |
+---
+yes .
+---
+a 0
+- 1
+b 0
+z 0
+status=0
 ## END
 
 #### Escaped {
@@ -172,4 +288,57 @@ pat='^(\$\{?)([A-Za-z0-9_]*)$'
 ## STDOUT:
 true
 true
+## END
+
+#### regex with unprintable characters
+# can't have nul byte
+
+# This pattern has literal characters
+pat=$'^[\x01\x02]+$'
+
+[[ $'\x01\x02\x01' =~ $pat ]]; echo status=$?
+[[ $'a\x01' =~ $pat ]]; echo status=$?
+
+# NOTE: There doesn't appear to be any way to escape these!
+pat2='^[\x01\x02]+$'
+
+## STDOUT:
+status=0
+status=1
+## END
+
+#### pattern $f(x)  -- regression
+f=fff
+[[ fffx =~ $f(x) ]]
+echo status=$?
+[[ ffx =~ $f(x) ]]
+echo status=$?
+## STDOUT:
+status=0
+status=1
+## END
+
+#### pattern a=(1) 
+[[ a=x =~ a=(x) ]]
+echo status=$?
+[[ =x =~ a=(x) ]]
+echo status=$?
+## STDOUT:
+status=0
+status=1
+## END
+## BUG zsh status: 1
+## BUG zsh STDOUT:
+status=0
+## END
+
+#### pattern @f(x)
+shopt -s parse_at
+[[ @fx =~ @f(x) ]]
+echo status=$?
+[[ fx =~ @f(x) ]]
+echo status=$?
+## STDOUT:
+status=0
+status=1
 ## END

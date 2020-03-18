@@ -2,17 +2,9 @@ h1 {
   font-size: x-large;
 }
 
-body {
-  margin: 0 auto;
-  width: 60em;
-}
-
 table {
   border-collapse: collapse;
   font-family: sans-serif;
-}
-p {
-  text-align: center;
 }
 
 thead {
@@ -24,7 +16,7 @@ tbody tr:hover {
   background-color: #eee;
 }
 
-tfoot {  /* summary row */
+.totals {
   font-weight: bold;
 }
 
@@ -61,6 +53,7 @@ td {
 .n-i  { color: #660; font-size: large; }
 .bug  { color: #660; font-size: large; }
 .fail { color: darkred; font-size: large; }
+.timeout { color: purple; font-size: large; }
 
 .failed {
   background-color: #ffe0e0;
@@ -73,8 +66,3 @@ td {
 .osh-allow-fail {
   background-color: #ffffe0;
 }
-
-#home-link {
-  text-align: right;
-}
-

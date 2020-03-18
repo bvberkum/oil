@@ -1,11 +1,30 @@
 #!/usr/bin/env bash
 #
 # Usage:
-#   $SH ./runtime-errors.sh all
+#   $SH ./runtime-errors.sh <function name>
 #
 # Run with bash/dash/mksh/zsh.
 
 source test/common.sh
+
+# Run with SH=bash too
+SH=${SH:-bin/osh}
+
+banner() {
+  echo
+  echo ===== "$@" =====
+  echo
+}
+
+_error-case() {
+  $SH -c "$@"
+
+  # NOTE: This works with osh, not others.
+  local status=$?
+  if test $status != 1; then
+    die "Expected status 1, got $status"
+  fi
+}
 
 #
 # PARSE ERRORS
@@ -67,6 +86,103 @@ failed_command() {
   echo 'SHOULD NOT GET HERE'
 }
 
+# This quotes the same line of code twice, but maybe that's OK.  At least there
+# is different column information.
+errexit_usage_error() {
+  set -o errexit
+  type -z
+}
+
+errexit_subshell() {
+  set -o errexit
+
+  # Note: for loops, while loops don't trigger errexit; their components do
+  ( echo subshell; exit 42; )
+}
+
+errexit_dbracket() {
+  set -o errexit
+  [[ -n '' ]]
+  echo 'SHOULD NOT GET HERE'
+}
+
+shopt -s expand_aliases
+# Why can't this be in the function?
+alias foo='echo hi; ls '
+
+errexit_alias() {
+  set -o errexit
+
+  type foo
+
+  foo /nonexistent
+}
+
+_strict-errexit-case() {
+  local code=$1
+  banner "[strict_errexit] $code"
+  _error-case \
+    "set -o errexit; shopt -s strict_errexit; $code"
+  echo
+}
+
+strict_errexit_1() {
+  # Test out all the location info
+
+  _strict-errexit-case '! { echo 1; echo 2; }'
+
+  _strict-errexit-case '{ echo 1; echo 2; } && true'
+  _strict-errexit-case '{ echo 1; echo 2; } || true'
+
+  # More chains
+  _strict-errexit-case '{ echo 1; echo 2; } && true && true'
+  _strict-errexit-case 'true && { echo 1; echo 2; } || true || true'
+  _strict-errexit-case 'true && true && { echo 1; echo 2; } || true || true'
+
+  _strict-errexit-case 'if { echo 1; echo 2; }; then echo IF; fi'
+  _strict-errexit-case 'while { echo 1; echo 2; }; do echo WHILE; done'
+  _strict-errexit-case 'until { echo 1; echo 2; }; do echo UNTIL; done'
+}
+
+# OLD WAY OF BLAMING
+strict_errexit_2() {
+  # Test out all the location info
+
+  # command.Pipeline.
+  _strict-errexit-case 'if ls | wc -l; then echo Pipeline; fi'
+  _strict-errexit-case 'if ! ls | wc -l; then echo Pipeline; fi'
+
+  # This one is logical
+  #_strict-errexit-case 'if ! ls; then echo Pipeline; fi'
+
+  # command.AndOr
+  #_strict-errexit-case 'if echo a && echo b; then echo AndOr; fi'
+
+  # command.DoGroup
+  _strict-errexit-case '! for x in a; do echo $x; done'
+
+  # command.BraceGroup
+  _strict-errexit-case '_func() { echo; }; ! _func'
+  _strict-errexit-case '! { echo brace; }'
+
+  # command.Subshell
+  _strict-errexit-case '! ( echo subshell )'
+
+  # command.WhileUntil
+  _strict-errexit-case '! while false; do echo while; done'
+
+  # command.If
+  _strict-errexit-case '! if true; then false; fi'
+
+  # command.Case
+  _strict-errexit-case '! case x in x) echo x;; esac'
+
+  # command.TimeBlock
+  _strict-errexit-case '! time echo hi'
+
+  _strict-errexit-case '! echo $(echo hi)'
+}
+
 pipefail() {
   false | wc -l
 
@@ -122,6 +238,9 @@ pipefail_while() {
 }
 
 # Multiple errors from multiple processes
+# TODO: These errors get interleaved and messed up.  Maybe we should always
+# print a single line from pipeline processes?  We should set their
+# ErrorFormatter?
 pipefail_multiple() {
   set -o errexit -o pipefail
   { echo 'four'; sh -c 'exit 4'; } |
@@ -135,6 +254,19 @@ control_flow() {
   continue
 
   echo 'SHOULD NOT GET HERE'
+}
+
+# Errors from core/process.py
+core_process() {
+  echo foo > not/a/file
+  echo foo > /etc/no-perms-for-this
+  echo hi 1>&3
+}
+
+# Errors from osh/state.py
+osh_state() {
+  # $HOME is exported so it can't be an array
+  HOME=(a b)
 }
 
 ambiguous_redirect() {
@@ -166,7 +298,7 @@ ambiguous_redirect_context() {
 
   set -o errexit
 
-  # This is strict-errexit!
+  # This is the issue addressed by more_errexit!
   echo $(echo hi > "$@")
   echo 'ambiguous is NOT FATAL in command sub, even if errexit'
   echo
@@ -207,27 +339,18 @@ nounset_arith() {
 }
 
 divzero() {
-  echo $(( 1 / 0 ))
+  _error-case 'echo $(( 1 / 0 ))'
+  _error-case 'echo $(( 1 % 0 ))'
 
-  echo 'SHOULD NOT GET HERE'
-}
+  _error-case 'zero=0; echo $(( 1 / zero ))'
+  _error-case 'zero=0; echo $(( 1 % zero ))'
 
-divzero_var() {
-  local zero=0
-  echo $(( 1 / zero ))
+  _error-case '(( a = 1 / 0 )); echo non-fatal; exit 1'
+  _error-case '(( a = 1 % 0 )); echo non-fatal; exit 1'
 
-  echo 'SHOULD NOT GET HERE'
-}
-
-divzero_dparen() {
-  (( 1 / 0 ))
-
-  echo 'Divide by zero in dparen is non-fatal unless errexit!'
-
-  set -o errexit
-  (( 1 / 0 ))
-
-  echo 'SHOULD NOT GET HERE'
+  # fatal!
+  _error-case 'set -e; (( a = 1 / 0 ));'
+  _error-case 'set -e; (( a = 1 % 0 ));'
 }
 
 # Only dash flags this as an error.
@@ -235,7 +358,7 @@ string_to_int_arith() {
   local x='ZZZ'
   echo $(( x + 5 ))
 
-  set -o strict-arith
+  shopt -s strict_arith
 
   echo $(( x + 5 ))
 
@@ -271,15 +394,37 @@ undef_arith() {
 }
 
 undef_arith2() {
-  # undefined cell
   a=()
+
+  # undefined cell: This is kind of what happens in awk / "wok"
   (( a[42]++ ))
+  (( a[42]++ ))
+  spec/bin/argv.py "${a[@]}"
 }
 
 array_arith() {
   a=(1 2)
   (( a++ ))  # doesn't make sense
   echo "${a[@]}"
+}
+
+undef_assoc_array() {
+  declare -A A
+  A['foo']=bar
+  echo "${A['foo']}"
+
+  # TODO: none of this is implemented!
+  if false; then
+    A['spam']+=1
+    A['spam']+=1
+
+    spec/bin/argv.py "${A[@]}"
+
+    (( A['spam']++ ))
+    (( A['spam']++ ))
+
+    spec/bin/argv.py "${A[@]}"
+  fi
 }
 
 patsub_bad_glob() {
@@ -290,15 +435,6 @@ patsub_bad_glob() {
 
 
 #
-# Builtins
-#
-
-test_builtin() {
-  # xxx is not a valid file descriptor
-  [ -t xxx ]
-}
-
-#
 # BOOLEAN ERRORS
 #
 
@@ -306,7 +442,7 @@ test_builtin() {
 string_to_int_bool() {
   [[ a -eq 0 ]]
 
-  set -o strict-arith
+  shopt -s strict_arith
 
   [[ a -eq 0 ]]
   echo 'SHOULD NOT GET HERE'
@@ -315,19 +451,19 @@ string_to_int_bool() {
 strict_array() {
   set -- 1 2
   echo foo > _tmp/"$@"
-  set -o strict-array
+  shopt -s strict_array
   echo foo > _tmp/"$@"
 }
 
 strict_array_2() {
   local foo="$@"
-  set -o strict-array
+  shopt -s strict_array
   local foo="$@"
 }
 
 strict_array_3() {
   local foo=${1:- "[$@]" }
-  set -o strict-array
+  shopt -s strict_array
   local foo=${1:- "[$@]" }
 }
 
@@ -336,7 +472,8 @@ strict_array_4() {
   x[42]=99
   echo "x[42] = ${x[42]}"
 
-  set -o strict-array
+  # Not implemented yet
+  shopt -s strict_array
   local -a y
   y[42]=99
 }
@@ -349,6 +486,190 @@ array_assign_1() {
 array_assign_2() {
   readonly -a array=(1 2 3)
   array[0]=x
+}
+
+readonly_assign() {
+  readonly x=1
+  x=2
+}
+
+multiple_assign() {
+  readonly x=1
+  # It blames x, not a!
+  a=1 b=2 x=42
+}
+
+multiple_assign_2() {
+  readonly y
+  local x=1 y=$(( x ))
+  echo $y
+}
+
+string_as_array() {
+  local str='foo'
+  echo $str
+  echo "${str[@]}"
+}
+
+#
+# BUILTINS
+#
+
+builtin_bracket() {
+  # xxx is not a valid file descriptor
+  [ -t xxx ]
+}
+
+builtin_builtin() {
+  set +o errexit
+  builtin ls
+}
+
+builtin_source() {
+  source
+
+  bad=/nonexistent/path
+  source $bad
+}
+
+builtin_cd() {
+  ( unset HOME
+    cd
+  )
+
+  # TODO: Hm this gives a different useful error without location info
+  ( unset HOME
+    HOME=(a b)
+    cd
+  )
+
+  # TODO: Hm this gives a different useful error without location info
+  ( unset OLDPWD
+    cd -
+  )
+
+  ( cd /nonexistent
+  )
+}
+
+builtin_pushd() {
+  pushd /nonexistent
+}
+
+builtin_popd() {
+  popd  # empty dir stack
+
+  (
+    local dir=$PWD/_tmp/runtime-error-popd
+    mkdir -p $dir
+    pushd $dir
+    pushd /
+    rmdir $dir
+    popd
+  )
+}
+
+builtin_unset() {
+  local x=x
+  readonly a
+
+  unset x a
+  unset -v x a
+}
+
+builtin_alias_unalias() {
+  alias zzz
+  unalias zzz
+}
+
+builtin_help() {
+  help zzz
+}
+
+builtin_trap() {
+  trap 
+  trap EXIT
+
+  trap zzz yyy
+}
+
+builtin_getopts() {
+  getopts
+  getopts 'a:' 
+
+  # TODO: It would be nice to put this in a loop and use it properly
+  set -- -a
+  getopts 'a:' varname
+}
+
+builtin_printf() {
+  printf '%s %d\n' foo not_a_number
+  echo status=$?
+
+  # bad arg recycling.  This is really a runtime error.
+  printf '%s %d\n' foo 3 bar
+  echo status=$?
+}
+
+
+builtin_wait() {
+  wait 1234578
+}
+
+builtin_exec() {
+  exec nonexistent-command 1 2 3
+  echo $?
+}
+
+#
+# Strict options (see spec/strict_options.sh)
+#
+
+strict_word_eval_warnings() {
+  # Warnings when 'set +o strict_word_eval' is OFF
+
+  echo slice start negative
+  s='abc'
+  echo -${s: -2}-
+
+  echo slice length negative
+  s='abc'
+  echo -${s: 1: -2}-
+
+  # TODO: These need span IDs.
+  # - invalid utf-8 and also invalid backslash escape
+
+  echo slice bad utf-8
+  s=$(echo -e "\xFF")bcdef
+  echo -${s:1:3}-
+
+  echo length bad utf-8
+  echo ${#s}
+}
+
+strict_arith_warnings() {
+  local x='xx'
+  echo $(( x + 1 ))
+
+  # TODO: OSH is more lenient here actually
+  local y='-yy-'
+  echo $(( y + 1 ))
+
+  [[ $y -eq 0 ]]
+
+  echo 'done'
+}
+
+strict_control_flow_warnings() {
+  break
+}
+
+control_flow_subshell() {
+  set -o errexit
+  for i in $(seq 2); do
+    echo $i
+    ( break; echo 'oops')
+  done
 }
 
 #
@@ -372,14 +693,25 @@ all() {
 
   for t in \
     no_such_command no_such_command_commandsub no_such_command_heredoc \
-    failed_command \
-    pipefail pipefail_group pipefail_subshell pipefail_func pipefail_while \
-    nonexistent nounset bad_var_ref \
-    nounset_arith divzero divzero_var array_arith undef_arith undef_arith2 \
+    failed_command errexit_usage_error errexit_subshell errexit_dbracket \
+    errexit_alias strict_errexit_1 strict_errexit_2 \
+    pipefail pipefail_group pipefail_subshell pipefail_func \
+    pipefail_while pipefail_multiple \
+    core_process osh_state \
+    nounset bad_var_ref \
+    nounset_arith divzero \
+    array_arith undef_arith undef_arith2 \
+    undef_assoc_array \
     string_to_int_arith string_to_hex string_to_octal \
-    string_to_intbase string_to_int_bool \
-    array_assign_1 array_assign_2 patsub_bad_glob; do
-
+    string_to_intbase string_to_int_bool string_as_array \
+    array_assign_1 array_assign_2 readonly_assign \
+    multiple_assign multiple_assign_2 patsub_bad_glob \
+    builtin_bracket builtin_builtin builtin_source builtin_cd builtin_pushd \
+    builtin_popd builtin_unset builtin_alias_unalias builtin_help \
+    builtin_trap builtin_getopts builtin_wait \
+    builtin_exec \
+    strict_word_eval_warnings strict_arith_warnings \
+    strict_control_flow_warnings control_flow_subshell; do
     _run_test $t
   done
 }

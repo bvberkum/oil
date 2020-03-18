@@ -1,109 +1,115 @@
--- Data types for evaluating an AST (or LST at the moment.)
-
--- TODO: add ASDL option to put constructors under the variant namespace:
---   part_value.String, part_value.Array
---   fragment
---   arg.Const, arg.Glob
---   value.Str, value StrArray,
+-- Data types for evaluating the syntax tree
 
 module runtime
 {
-  -- A static word_part from osh.asdl is evaluated to a dynamic part_value.
+  -- Evaluating SimpleCommand results in either an argv array or an assignment.
+  -- in 'local foo', rval is None
+  assign_arg = (lvalue lval, value? rval, int spid)
+
+  -- ASDL issue: I need to import the 'command' type from frontend/syntax.asdl!
+  -- and 'builtin' from synthetic option_asdl
+  cmd_value =
+    Argv(string* argv, int* arg_spids, any? block)
+  | Assign(int builtin_id,
+           string* argv, int* arg_spids,
+           assign_arg* pairs)
+
+  quote = Default | FnMatch | ERE
+
+  -- A parse-time word_part from syntax.asdl is evaluated to a runtime
+  -- part_value.
   part_value = 
-    -- Substitutions and unquoted literals get split/elided/globbed.
-    -- TODO: invert and rename to 'quoted', because quoted means escaping
-    -- in other contexts!
-    String(string s, bool do_split_glob)
-    -- "$@" or "${a[@]}" -- never split or globbed since double quoted.
+
+    -- * Single or double quoted parts get neither split or globbed.
+    -- * Bare words like echo or *.py are globbed, but NOT split with IFS.
+    -- * Unquoted Substitutions are split and globbed.
+    String(string s, bool quoted, bool do_split)
+
+    -- "$@" or "${a[@]}" -- never globbed or split (though other shells
+    -- split them)
   | Array(string* strs)
 
   -- A static word from osh.asdl is evaluted to a dynamic value.  value
   -- instances are stored in state.Mem().
   value =
-    -- Undef isn't visible at the language level.  We model it as a value
-    -- rather than an error code because it's manipulated with ${a:-default}
-    -- and such.
+    -- An Undef value is different than "no binding" because of dynamic scope.
     Undef
   | Str(string s)
-  | StrArray(string* strs)
-  | AssocArray(dict d)
+    -- Important: This is NOT stored in state.Mem now.  It's used only by
+    -- the arithmetic evaluator.
+  | Int(int i)
+    -- "holes" in the array are represented by None
+  | MaybeStrArray(string* strs)
+    -- d will be a dict
+  | AssocArray(assoc d)
+    -- any should be re_t.  Need syntax.asdl here
+  | Eggex(any expr, string as_ere)
+    -- what about Proc or Module here?  are they first class?
+    -- then you can reflect on them?  Get name and docstring?
 
-  -- For Oil?
-  -- | ArrayInt(int* array_int)
-  -- | ArrayBool(bool* a)
+    -- A Python-style object.  'any' is not currently type checked.
+    -- invariant for 'proc' stack:
+    -- * s bool, int, float, (NOT str), or...
+    -- * BoolArray, IntArray, FloatArray (NOT StrArray), or ...
+    -- * heterogeneous List (NOT dict)
+    -- * or a user-defined type
+  | Obj(any obj)
 
-  -- For storing a variable.
-  cell = (value val, bool exported, bool readonly, bool is_assoc_array)
+  -- A cell is a wrapper for a value.  16 bytes in C++.
+  -- TODO: add spid for last-assigned location
 
-  -- An undefined variable can become an indexed array with s[x]=1.  But if we
-  -- 'declare -A' it, it will be undefined and waiting to turn into an
-  -- associative array.
-  var_flags = Exported | ReadOnly | AssocArray | Global
-  scope = TempEnv | LocalOnly | GlobalOnly | Dynamic
+  -- Invariant: if exported or nameref is set, the val should be Str or Undef.
+  -- This is enforced in mem.SetVar but isn't expressed in the schema.
+  cell = (bool exported, bool readonly, bool nameref, value val)
 
-  -- For assignment, evaluated to osh_ast.lhs_expr
+  -- Dynamic is for shell; LocalOrGlobal is for Oil
+  scope = LocalOnly | GlobalOnly | Dynamic | LocalOrGlobal
+
+  -- For OSH assignment, evaluated from osh_ast.lhs_expr
+  -- TODO: Rename this to sh_place?
   lvalue = 
-    LhsName(string name)
-  | LhsIndexedName(string name, int index)
+    Named(string name)
+  | Indexed(string name, int index)
+  | Keyed(string name, string key)
 
-  -- evaluated version of osh_ast.redir
+    -- Oil variants
+  | ObjIndex(any obj, any index)
+  | ObjAttr(any obj, string attr)
+  attributes (int* spids)
+
+  -- evaluated version of syntax.redir
   redirect = 
-    PathRedirect(id op_id, int fd, string filename)
-  | DescRedirect(id op_id, int fd, int target_fd)
+    Path(id op_id, int fd, string filename, int op_spid)
+  | FileDesc(id op_id, int fd, int target_fd, int op_spid)
     -- here doc or here word
-  | HereRedirect(int fd, string body)
+  | HereDoc(int fd, string body, int op_spid)
 
-  -- NOTE: not used right now, isinstance() check works fine
   job_status =
-    ProcessStatus(int status)
-  | PipelineStatus(int* statuses)
+    Proc(int code)
+  | Pipeline(int* codes)
 
-  -- For word splitting in legacy.py
+  -- For word splitting (in frontend/consts.py and osh/split.py)
   span = Black | Delim | Backslash
   emit = Part | Delim | Empty | Escape | Nothing
-  state = Invalid | Start | DE_White1 | DE_Gray | DE_White2 | Black | Backslash
+  state = Invalid | Start | DE_White1 | DE_Gray | DE_White2 | Black | Backslash | Done
 
-  -- Edges are characters.  CH_DE_ is the delimiter prefix.  WHITE is for
-  -- whitespace; GRAY is for other IFS chars; Black is for significant
-  -- characters.
-  char_kind = DE_White | DE_Gray | Black | Backslash
-
-  builtin = 
-    NONE | READ | ECHO | PRINTF | SHIFT
-  | CD | PUSHD | POPD | DIRS
-  | EXPORT | UNSET | SET | SHOPT
-  | TRAP | UMASK
-  | SOURCE | DOT | EVAL | EXEC | WAIT | JOBS
-  | COMPLETE | COMPGEN | COMPOPT
-  | TRUE | FALSE
-  | COLON
-  | TEST | BRACKET | GETOPTS
-  | COMMAND | TYPE | HELP
-  | DECLARE | TYPESET | ALIAS | UNALIAS
-  | PWD
-  | REPR
+  -- Edges are characters.  DE_ is the delimiter prefix.  DE_White is for
+  -- whitespace; DE_Gray is for other IFS chars; Black is for significant
+  -- characters.  Sentinel is the end of the string.
+  char_kind = DE_White | DE_Gray | Black | Backslash | Sentinel
 
   -- word_eval.py: SliceParts is for ${a-} and ${a+}, Error is for ${a?}, and
   -- SliceAndAssign is for ${a=}.
+  -- TODO: Could be cleaner if Error and SpliceAndAssign have part_vals
   effect = SpliceParts | Error | SpliceAndAssign | NoOp
 
   -- core/process.py
-  process_state = Init | Done
-
-  -- core/completion.py
-  -- NONE: nothing detected, should we default to filenames/directories?
-  -- REDIR_FILENAME: stdin only
-  -- HASH_KEY: do this later
-
-  -- Note: this could also be a CompRequest
-  -- CompRequest(FIRST, prefix)
-  -- CompRequest(REST, prefix, comp_words)  # use the full contact
-  -- CompRequest(VAR_NAME, prefix)
-  -- CompRequest(HASH_KEY, prefix, hash_name)  # use var name
-  -- CompRequest(REDIR_FILENAME, prefix)
-
-  completion_state = 
-    NONE | FIRST | REST | VAR_NAME | HASH_KEY | REDIR_FILENAME
+  -- A Job is a Process or Pipeline.
+  -- * Proceses usually go from Running to Stopped, unless unless Ctrl-Z stops
+  --   them.
+  -- * Pipelines go Running to Done.  They are never stopped; only the processes
+  --   inside them are stopped.
+  job_state = Running | Done | Stopped
 
   -- tools/osh2oil.py
   word_style = Expr | Unquoted | DQ | SQ

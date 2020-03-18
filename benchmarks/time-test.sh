@@ -10,7 +10,7 @@ set -o errexit
 source test/common.sh
 
 time-tool() {
-  $(dirname $0)/time.py "$@"
+  $(dirname $0)/time_.py "$@"
 }
 
 test-tsv() {
@@ -23,17 +23,48 @@ test-tsv() {
   cat $out
 }
 
+test-append() {
+  local out=_tmp/overwrite.tsv
+  for i in 4 5; do
+    time-tool --tsv -o $out -- sleep 0.0${i}
+  done
+  local num_lines=$(cat $out | wc -l)
+  test $num_lines -eq 1 || fail "Expected 1 line, got $num_lines"
+
+  local out=_tmp/append.tsv
+  for i in 4 5; do
+    time-tool --tsv -o $out --append -- sleep 0.0${i}
+  done
+  wc -l $out
+}
+
+test-usage() {
+  # no args
+  set +o errexit
+
+  time-tool; status=$?
+  test $status = 2 || fail "Unexpected status $status"
+  time-tool --output; status=$?
+  test $status = 2 || fail "Unexpected status $status"
+
+  time-tool sleep 0.1
+  time-tool --append sleep 0.1; status=$?
+  test $status = 0 || fail "Unexpected status $status"
+
+  set -o errexit
+}
+
 test-cannot-serialize() {
   local out=_tmp/time2.tsv
   rm -f $out
 
   set +o errexit
 
-  # Tab should fail
+  # Newline should fail
   time-tool --tsv -o $out --field $'\n' -- sleep 0.001; status=$?
   test $status = 1 || fail "Unexpected status $status"
 
-  # Newline should fail
+  # Tab should fail
   time-tool --tsv -o $out --field $'\t' -- sleep 0.001; status=$?
   test $status = 1 || fail "Unexpected status $status"
 
@@ -55,7 +86,9 @@ test-cannot-serialize() {
 }
 
 all-passing() {
+  test-usage
   test-tsv
+  test-append
   test-cannot-serialize
 
   echo

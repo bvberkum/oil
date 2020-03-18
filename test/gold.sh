@@ -11,10 +11,9 @@
 set -o nounset
 set -o pipefail
 set -o errexit
+shopt -s strict:all 2>/dev/null || true  # dogfood for OSH
 
 source test/common.sh  # for $OSH
-
-export ASDL_TYPE_CHECK=1
 
 # Runs an command (argv) the normal way (with its shebang) and then with
 # OSH, and compares the stdout and exit code.
@@ -23,6 +22,8 @@ export ASDL_TYPE_CHECK=1
 # and so forth.
 _compare() {
   set +o errexit
+
+  # NOTE: This will be wrong with OSH_HIJACK_SHEBANG!
 
   "$@" >_tmp/shebang.txt
   local expected_status=$?
@@ -60,7 +61,7 @@ count() {
 
 # Uses $(cd $(dirname $0) && pwd)
 one-spec-test() {
-  _compare test/spec.sh builtins-special
+  _compare test/spec.sh builtin-special
 }
 
 # Uses redirect of functions.
@@ -121,7 +122,26 @@ readlink-case() {
 
 # Hm this isn't tickling the bug?
 errexit-confusion() {
-  _compare gold/errexit-confusion.sh run-for-release
+  _compare gold/errexit-confusion.sh run-for-release-OLD
+  _compare gold/errexit-confusion.sh run-for-release-FIXED
+}
+
+parse-help() {
+  local dir=testdata/parse-help
+
+  # This is not hermetic since it calls 'ls'
+  _compare $dir/excerpt.sh _parse_help ls
+}
+
+# Gah, bash gets this from compile-time configuration generated with autoconf,
+# not uname().  It looks like 'linux-gnu' on Ubuntu.  In Alpine, it's
+# 'linux-musl'.
+_ostype() {
+  echo $OSTYPE
+}
+
+ostype() {
+  _compare $0 _ostype
 }
 
 readonly -a PASSING=(
@@ -152,6 +172,10 @@ readonly -a PASSING=(
   html-summary
   gen-module-init
   readlink-case
+
+  errexit-confusion
+
+  parse-help
 
   # This one takes a little long, but it's realistic.
   #wild

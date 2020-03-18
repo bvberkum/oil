@@ -13,9 +13,15 @@
 #   test/spec-bin.sh copy-all     # Put them in _tmp/spec-bin
 #   test/spec-bin.sh test-all     # Run a small smoke test
 #
+# Once you've run all steps manually and understand how they work, run them
+# all at once with:
+#
+#   test/spec-bin.sh all-steps
+#
 # Could also build these:
 # - coreutils
 # - re2c for the OSH build (now in build/codegen.sh)
+# - cmark
 
 set -o nounset
 set -o pipefail
@@ -24,12 +30,20 @@ set -o errexit
 readonly THIS_DIR=$(cd $(dirname $0) && pwd)
 readonly DIR=$THIS_DIR/../_tmp/spec-bin
 
+readonly BUSYBOX_NAME='busybox-1.31.1'
+
+upstream() {
+  # Not for end users
+  wget --directory _tmp \
+    https://busybox.net/downloads/busybox-1.31.1.tar.bz2
+}
+
 # The authoritative versions!
 download() {
   mkdir -p $DIR
   wget --no-clobber --directory $DIR \
     https://www.oilshell.org/blob/spec-bin/bash-4.4.tar.gz \
-    https://www.oilshell.org/blob/spec-bin/busybox-1.22.0.tar.bz2 \
+    https://www.oilshell.org/blob/spec-bin/busybox-1.31.1.tar.bz2 \
     https://www.oilshell.org/blob/spec-bin/dash-0.5.8.tar.gz \
     https://www.oilshell.org/blob/spec-bin/mksh-R52c.tgz \
     https://www.oilshell.org/blob/spec-bin/zsh-5.1.1.tar.xz
@@ -37,11 +51,16 @@ download() {
 
 extract-all() {
   pushd $DIR
+
+  # Remove name collision: _tmp/spec-bin/mksh could be a FILE and a DIRECTORY.
+  # This is unfortunately how their tarball is laid out.
+  rm --verbose -r -f $DIR/mksh $DIR/mksh-R52c
+
   for archive in *.tar.* *.tgz; do
     echo $archive
     tar --extract --file $archive
   done
-  mv -v mksh mksh-R52c  # so it doesn't collide
+  mv --verbose --no-target-directory mksh mksh-R52c  # so it doesn't collide
   popd
 }
 
@@ -97,7 +116,7 @@ build-mksh() {
 }
 
 build-busybox() {
-  pushd $DIR/busybox-1.22.0
+  pushd $DIR/$BUSYBOX_NAME
   make defconfig
   make
   popd
@@ -118,7 +137,7 @@ copy-all() {
   cp -f -v bash-4.4/bash .
   cp -f -v dash-0.5.8/src/dash .
   cp -f -v mksh-R52c/mksh .
-  cp -f -v busybox-1.22.0/busybox .
+  cp -f -v $BUSYBOX_NAME/busybox .
   ln -s -f -v busybox ash
 
   # In its own tree
@@ -174,6 +193,14 @@ publish-tmp() {
   local dest=oilshell.org/share/2018-10-06-tmp/
   ssh ${name}@${name}.org mkdir -p $dest
   scp _deps/re2c-1.0.3/re2c ${name}@${name}.org:$dest
+}
+
+all-steps() {
+  download     # Get the right version of every tarball
+  extract-all  # Extract source
+  build-all    # Compile
+  copy-all     # Put them in _tmp/spec-bin
+  test-all     # Run a small smoke test
 }
 
 "$@"

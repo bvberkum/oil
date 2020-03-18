@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python2
 """
 parse_cpython.py
 """
@@ -10,7 +10,8 @@ import re
 import sys
 
 from core.util import log
-from frontend.lexer import C, R
+# TODO: Could move these to a place where they don't depend on Oil
+from frontend.lexer_def import C, R
 
 
 C_DEF = [
@@ -18,7 +19,7 @@ C_DEF = [
   R(r'[ \t\n]+', 'Whitespace'),
 
   # This could be more space-insensitive.
-  R(r'static.*PyMethodDef (.*)\[\] = ', 'BeginDef'),
+  R(r'static.*PyMethodDef (.*)\[\]\s*=\s*', 'BeginDef'),
   C(r'{', 'LBrace'),
   C(r'}', 'RBrace'),
   C(r',', 'Comma'),
@@ -64,8 +65,8 @@ class Lexer(object):
             'no token matched at position %r: %r' % ( pos, s[pos]))
 
       if id_ != 'Whitespace':
-        yield id_, s[start:end]
-    yield 'EOF', ''
+        yield id_, s[start:end], pos
+    yield 'EOF', '', -1
 
 
 class Parser(object):
@@ -77,7 +78,7 @@ class Parser(object):
 
   def Next(self):
     while True:
-      self.tok_id, self.tok_val = self.tokens.next()
+      self.tok_id, self.tok_val, self.pos = self.tokens.next()
       if self.tok_id not in ('Comment', 'Whitespace'):
         break
     if 0:
@@ -85,7 +86,10 @@ class Parser(object):
 
   def Eat(self, tok_id):
     if self.tok_id != tok_id:
-      raise RuntimeError('Expected %r, got %r' % (tok_id, self.tok_id))
+      raise RuntimeError(
+          'Expected %r, got %r %r (byte offset %d)' %
+          (tok_id, self.tok_id, self.tok_val, self.pos))
+
     self.Next()
 
   def ParseName(self):
@@ -222,6 +226,7 @@ MODULES_TO_FILTER = [
     # My Own
     'libc.c',
     'fastlex.c',
+    'line_input.c',
 
     'import.c',
     'marshal.c',  # additional filters below
@@ -276,6 +281,7 @@ MODULES_TO_FILTER = [
     'resource.c',
     'signalmodule.c',
     'timemodule.c',
+    'termios.c',
 ]
 
 
@@ -287,6 +293,12 @@ class OilMethodFilter(object):
   def __call__(self, rel_path, def_name, method_name):
     basename = os.path.basename(rel_path) 
 
+    if method_name == 'count':  # False positive for {str,list,tuple}.count()
+      return False
+
+    if method_name == 'collect':  # False positive: pyannotate and gcmodule.c
+      return False
+
     # enter/exit needed for 'with open'.  __length_hint__ is an optimization.
     if method_name in ('__enter__', '__exit__', '__length_hint__'):
       return True
@@ -295,15 +307,21 @@ class OilMethodFilter(object):
     #   __getnewargs__.
     # - Do we need __sizeof__?  Is that for sys.getsizeof()?
 
-    # NOTE: asdl/unpickle.py needs marshal.loads.
+    # NOTE: LoadOilGrammar needs marshal.loads().
+    # False positive for yajl.dumps() and load()
     if basename == 'marshal.c' and method_name in ('dump', 'dumps', 'load'):
       return False
 
     # Auto-filtering gave false-positives here.
     # We don't need top-level next().  The method should be good enough.
+    # iter is a field name
     if (basename == 'bltinmodule.c' and
-        method_name in ('compile', 'format', 'next', 'vars')):
+        method_name in ('compile', 'format', 'next', 'vars', 'iter', 'eval')):
       return False
+    if basename == 'bltinmodule.c':
+      # Get "bootstrapping error" without this.
+      if method_name == '__import__':
+        return True
 
     if basename == '_warnings.c' and method_name == 'warn':
       return False
@@ -320,6 +338,14 @@ class OilMethodFilter(object):
     if basename == 'genobject.c' and method_name == 'close':  # Shadowed
       return False
 
+    # We're using list.remove()
+    if basename == 'posixmodule.c' and method_name == 'remove':  # Shadowed
+      return False
+
+    # We're using dict.clear() and list.remove()
+    if basename == 'setobject.c' and method_name in ('clear', 'remove'):
+      return False
+
     # Do custom filtering here.
     if (basename == 'sysmodule.c' and method_name not in self.py_names):
       # These can't be removed or they cause assertions!
@@ -330,9 +356,14 @@ class OilMethodFilter(object):
     if basename == 'signalmodule.c' and method_name == 'default_int_handler':
       return True
 
-    # I don't understand when this object is used in CPython, but it's not used
-    # in Oil.
+    # segfault without this
+    if basename == 'typeobject.c' and method_name == '__new__':
+      return True
+
     if basename == 'descrobject.c':
+      # Apparently used for dir() on class namespace, as in dir(Id).
+      if method_name == 'keys':
+        return True
       return False
 
     # Try just filtering {time,pwd,posix}module.c, etc.
@@ -373,7 +404,7 @@ def main(argv):
 
   if action == 'lex':  # for debugging
     while True:
-      id_, value = tokens.next()
+      id_, value, pos = tokens.next()
       print('%s\t%r' % (id_, value))
       if id_ == 'EOF':
         break

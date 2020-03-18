@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 # Copyright 2016 Andy Chu. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,17 +11,17 @@ cmd_exec_test.py: Tests for cmd_exec.py
 
 import unittest
 
+from _devbuild.gen.id_kind_asdl import Id
+from _devbuild.gen.syntax_asdl import (
+    braced_var_sub, suffix_op, compound_word
+)
 from core import test_lib
-from core.meta import syntax_asdl, Id
-from osh import state
-
-suffix_op = syntax_asdl.suffix_op
-osh_word = syntax_asdl.word
-word_part = syntax_asdl.word_part
+from core.test_lib import Tok
+from core import state
 
 
 def InitEvaluator():
-  word_ev = test_lib.MakeTestEvaluator()
+  word_ev = test_lib.InitWordEvaluator()
   state.SetLocalString(word_ev.mem, 'x', 'xxx')
   state.SetLocalString(word_ev.mem, 'y', 'yyy')
   return word_ev
@@ -30,15 +30,13 @@ def InitEvaluator():
 class ExpansionTest(unittest.TestCase):
 
   def testBraceExpand(self):
-    # TODO: Move this to test_lib?
-    _, c_parser = test_lib.InitCommandParser('echo _{a,b}_')
+    arena = test_lib.MakeArena('<cmd_exec_test.py>')
+    c_parser = test_lib.InitCommandParser('echo _{a,b}_', arena=arena)
     node = c_parser._ParseCommandLine()
     print(node)
 
-    arena = test_lib.MakeArena('<cmd_exec_test.py>')
-    ex = test_lib.InitExecutor(arena)
+    ex = test_lib.InitExecutor(arena=arena)
     #print(ex.Execute(node))
-
     #print(ex._ExpandWords(node.words))
 
 
@@ -46,20 +44,20 @@ class VarOpTest(unittest.TestCase):
 
   def testVarOps(self):
     ev = InitEvaluator()  # initializes x=xxx and y=yyy
-    unset_sub = word_part.BracedVarSub(syntax_asdl.token(Id.VSub_Name, 'unset'))
+    unset_sub = braced_var_sub(Tok(Id.VSub_Name, 'unset'))
     part_vals = []
     ev._EvalWordPart(unset_sub, part_vals)
     print(part_vals)
 
-    set_sub = word_part.BracedVarSub(syntax_asdl.token(Id.VSub_Name, 'x'))
+    set_sub = braced_var_sub(Tok(Id.VSub_Name, 'x'))
     part_vals = []
     ev._EvalWordPart(set_sub, part_vals)
     print(part_vals)
 
     # Now add some ops
-    part = word_part.LiteralPart(syntax_asdl.token(Id.Lit_Chars, 'default'))
-    arg_word = osh_word.CompoundWord([part])
-    test_op = suffix_op.StringUnary(Id.VTest_ColonHyphen, arg_word)
+    part = Tok(Id.Lit_Chars, 'default')
+    arg_word = compound_word([part])
+    test_op = suffix_op.Unary(Id.VTest_ColonHyphen, arg_word)
     unset_sub.suffix_op = test_op
     set_sub.suffix_op = test_op
 

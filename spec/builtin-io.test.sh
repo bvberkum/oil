@@ -60,7 +60,7 @@ echo -ez 'abc\n'
 
 #### echo -e with embedded newline 
 flags='-e'
-case $SH in */dash) flags='' ;; esac
+case $SH in dash) flags='' ;; esac
 
 echo $flags 'foo
 bar'
@@ -71,7 +71,7 @@ bar
 
 #### echo -e line continuation
 flags='-e'
-case $SH in */dash) flags='' ;; esac
+case $SH in dash) flags='' ;; esac
 
 echo $flags 'foo\
 bar'
@@ -101,7 +101,7 @@ echo -e 'ab\0cd'
 
 #### \c stops processing input
 flags='-e'
-case $SH in */dash) flags='' ;; esac
+case $SH in dash) flags='' ;; esac
 
 echo $flags xy  'ab\cde'  'ab\cde'
 ## stdout-json: "xy ab"
@@ -114,14 +114,14 @@ echo -e 'abcd\x65f'
 
 #### echo -e with octal escape
 flags='-e'
-case $SH in */dash) flags='' ;; esac
+case $SH in dash) flags='' ;; esac
 
 echo $flags 'abcd\044e'
 ## stdout-json: "abcd$e\n"
 
 #### echo -e with 4 digit unicode escape
 flags='-e'
-case $SH in */dash) flags='' ;; esac
+case $SH in dash) flags='' ;; esac
 
 echo $flags 'abcd\u0065f'
 ## STDOUT:
@@ -131,7 +131,7 @@ abcdef
 
 #### echo -e with 8 digit unicode escape
 flags='-e'
-case $SH in */dash) flags='' ;; esac
+case $SH in dash) flags='' ;; esac
 
 echo $flags 'abcd\U00000065f'
 ## STDOUT:
@@ -153,7 +153,7 @@ echo -en '\04000' | od -A n -t x1 | sed 's/ \+/ /g'
 
 #### \0777 is out of range
 flags='-en'
-case $SH in */dash) flags='-n' ;; esac
+case $SH in dash) flags='-n' ;; esac
 
 echo $flags '\0777' | od -A n -t x1 | sed 's/ \+/ /g'
 ## stdout-json: " ff\n"
@@ -174,7 +174,7 @@ echo -e '\x' '\xg' | od -A n -c | sed 's/ \+/ /g'
 
 #### incomplete octal escape
 flags='-en'
-case $SH in */dash) flags='-n' ;; esac
+case $SH in dash) flags='-n' ;; esac
 
 echo $flags 'abcd\04' | od -A n -c | sed 's/ \+/ /g'
 ## stdout-json: " a b c d 004\n"
@@ -187,7 +187,7 @@ echo -en 'abcd\u006' | od -A n -c | sed 's/ \+/ /g'
 
 #### \u6
 flags='-en'
-case $SH in */dash) flags='-n' ;; esac
+case $SH in dash) flags='-n' ;; esac
 
 echo $flags '\u6' | od -A n -c | sed 's/ \+/ /g'
 ## stdout-json: " 006\n"
@@ -197,7 +197,7 @@ echo $flags '\u6' | od -A n -c | sed 's/ \+/ /g'
 # \0 is special, but \1 isn't in bash
 # \1 is special in dash!  geez
 flags='-en'
-case $SH in */dash) flags='-n' ;; esac
+case $SH in dash) flags='-n' ;; esac
 
 echo $flags '\0' '\1' '\8' | od -A n -c | sed 's/ \+/ /g'
 ## stdout-json: " \\0 \\ 1 \\ 8\n"
@@ -355,3 +355,81 @@ echo $line
 ## BUG dash/zsh stdout-json: "\u0007 \u0008\n"
 ## BUG mksh stdout-json: "\u0007 \u0008 d \u001b \u000c g h e 145 i\n"
 
+#### Read builtin uses dynamic scope
+f() {
+  read head << EOF
+ref: refs/heads/dev/andy
+EOF
+}
+f
+echo $head
+## STDOUT:
+ref: refs/heads/dev/andy
+## END
+
+#### read -a reads into array
+
+# read -a is used in bash-completion
+# none of these shells implement it
+case $SH in
+  *mksh|*dash|*zsh|*/ash)
+    exit 2;
+    ;;
+esac
+
+read -a myarray <<'EOF'
+a b c\ d
+EOF
+argv.py "${myarray[@]}"
+
+# arguments are ignored here
+read -r -a array2 extra arguments <<'EOF'
+a b c\ d
+EOF
+argv.py "${array2[@]}"
+argv.py "${extra[@]}"
+argv.py "${arguments[@]}"
+## status: 0
+## STDOUT:
+['a', 'b', 'c d']
+['a', 'b', 'c\\', 'd']
+[]
+[]
+## END
+## N-I dash/mksh/zsh/ash status: 2
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### read -n with invalid arg
+read -n not_a_number
+echo status=$?
+## stdout: status=2
+## OK bash stdout: status=1
+## N-I zsh stdout-json: ""
+
+#### read returns correct number of bytes without EOF
+case $SH in
+  *bash|*osh) FLAG=n ;;
+  *mksh)      FLAG=N ;;
+  *) exit ;;  # other shells don't implement it, or hang
+esac
+
+i=0
+while true; do
+  echo -n x
+
+  (( i++ ))
+
+  # TODO: Why does OSH hang without this test?  Other shells are fine.  I can't
+  # reproduce outside of sh_spec.py.
+  if test $i = 100; then
+    break
+    #true
+  fi
+done | { read -$FLAG 3; echo $REPLY; }
+
+## status: 0
+## stdout: xxx
+## N-I dash/ash stdout-json: ""
+
+# zsh appears to hang with -k
+## N-I zsh stdout-json: ""

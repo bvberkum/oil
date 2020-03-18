@@ -1,10 +1,10 @@
-#!/usr/bin/python
 """
 os_path.py - Copy of code from Python's posixpath.py and genericpath.py.
 """
 
-import posix
-import stat
+import posix_ as posix
+
+from typing import Tuple, List
 
 extsep = '.'
 sep = '/'
@@ -13,29 +13,12 @@ defpath = ':/bin:/usr/bin'
 altsep = None
 
 
-def exists(path):
-    """Test whether a path exists.  Returns False for broken symbolic links"""
-    try:
-        posix.stat(path)
-    except posix.error:
-        return False
-    return True
-
-
-def isdir(s):
-    """Return true if the pathname refers to an existing directory."""
-    try:
-        st = posix.stat(s)
-    except posix.error:
-        return False
-    return stat.S_ISDIR(st.st_mode)
-
-
 # Join pathnames.
 # Ignore the previous parts if a part is absolute.
 # Insert a '/' unless the first part is empty or already ends in '/'.
 
 def join(a, *p):
+    # type: (str, *str) -> str
     """Join two or more pathname components, inserting '/' as needed.
     If any component is an absolute path, all previous path components
     will be discarded.  An empty last part will result in a path that
@@ -57,6 +40,7 @@ def join(a, *p):
 # Trailing '/'es are stripped from head unless it is the root.
 
 def split(p):
+    # type: (str) -> Tuple[str, str]
     """Split a pathname.  Returns tuple "(head, tail)" where "tail" is
     everything after the final slash.  Either part may be empty."""
     i = p.rfind('/') + 1
@@ -74,6 +58,7 @@ def split(p):
 # Generic implementation of splitext, to be parametrized with
 # the separators
 def _splitext(p, sep, altsep, extsep):
+    # type: (str, str, str, str) -> Tuple[str, str]
     """Split the extension from a pathname.
 
     Extension is everything from the last dot to the end, ignoring
@@ -102,12 +87,14 @@ def _splitext(p, sep, altsep, extsep):
 # It is always true that root + ext == p.
 
 def splitext(p):
+    # type: (str) -> Tuple[str, str]
     return _splitext(p, sep, altsep, extsep)
 
 
 # Return the tail (basename) part of a path, same as split(path)[1].
 
 def basename(p):
+    # type: (str) -> str
     """Returns the final component of a pathname"""
     i = p.rfind('/') + 1
     return p[i:]
@@ -116,6 +103,7 @@ def basename(p):
 # Return the head (dirname) part of a path, same as split(path)[0].
 
 def dirname(p):
+    # type: (str) -> str
     """Returns the directory component of a pathname"""
     i = p.rfind('/') + 1
     head = p[:i]
@@ -129,20 +117,21 @@ def dirname(p):
 # if it contains symbolic links!
 
 def normpath(path):
+    # type: (str) -> str
     """Normalize path, eliminating double slashes, etc."""
     # Preserve unicode (if path is unicode)
     #slash, dot = (u'/', u'.') if isinstance(path, _unicode) else ('/', '.')
     slash, dot = ('/', '.')
     if path == '':
         return dot
-    initial_slashes = path.startswith('/')
+    initial_slashes = path.startswith('/')  # type: int
     # POSIX allows one or two initial slashes, but treats three or more
     # as single slash.
     if (initial_slashes and
         path.startswith('//') and not path.startswith('///')):
         initial_slashes = 2
     comps = path.split('/')
-    new_comps = []
+    new_comps = []  # type: List[str]
     for comp in comps:
         if comp in ('', '.'):
             continue
@@ -162,11 +151,13 @@ def normpath(path):
 # Trivial in Posix, harder on the Mac or MS-DOS.
 
 def isabs(s):
+    # type: (str) -> bool
     """Test whether a path is absolute"""
     return s.startswith('/')
 
 
 def abspath(path):
+    # type: (str) -> str
     """Return an absolute path."""
     if not isabs(path):
         cwd = posix.getcwd()

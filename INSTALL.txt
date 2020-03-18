@@ -4,16 +4,15 @@ Building and Installing OSH
 OSH is a bash-compatible shell, and is part of the Oil project
 (http://www.oilshell.org).
 
-This file describes how to install OSH.  (It's in the release tarball and also
-published on the web.)
+This file describes how to configure, build, and install it from source code.
 
 Quick Start
 -----------
 
 If you haven't already done so, extract the tarball:
  
-    tar -x --xz < oil-0.6.pre9.tar.xz
-    cd oil-0.6.pre9
+    tar -x --xz < oil-0.8.pre2.tar.xz
+    cd oil-0.8.pre2
 
 Either install as /usr/local/bin/osh:
 
@@ -21,17 +20,20 @@ Either install as /usr/local/bin/osh:
     make             # 30-60 seconds
     sudo ./install
 
-or install as ~/bin/osh:
+or install as ~/bin/osh and the man page as ~/.local/share/man/man1/osh.1:
 
-    ./configure --prefix ~
+    ./configure --prefix ~ --datarootdir ~/.local/share
     make
     ./install
 
-The latter doesn't require root access, but it requires ~/bin to be in your
-PATH.
+The latter doesn't require root access, but it requires:
+
+- ~/bin to be in your $PATH
+- Pages under ~/.local/share/man to be found by 'man'.
+  (See manpath or $MANPATH.)
 
 NOTE: Out-of-tree builds are NOT currently supported, so you have to be in the
-oil-0.6.pre9 directory.
+oil-0.8.pre2 directory.
 
 Smoke Test
 ----------
@@ -45,6 +47,13 @@ This parses and prints a syntax tree for the 'configure' script.
 
     osh -n configure
 
+More Documentation
+------------------
+
+Every release has a home page with links, e.g.
+
+    https://oilshell.org/release/0.7.pre6/
+
 System Requirements
 -------------------
 
@@ -54,8 +63,7 @@ Roughly speaking, you need:
   - GNU Bash
   - GNU Make.
 
-(I want to eventually remove the GNU requirements and require just POSIX sh
-instead).
+(I want to remove the GNU requirements and require only POSIX sh instead).
 
 Optional:
 
@@ -70,8 +78,10 @@ Alpine Linux:
 
     apk add libc-dev gcc bash make readline-dev
 
-OSH hasn't been tested on non-Linux systems, but eventually it should run on
-any POSIX-compatible system.
+OSH has been tested several Linux distros and OS X.  It aims to run on any
+POSIX system.  If it doesn't, file a bug here:
+
+    https://github.com/oilshell/oil/issues
 
 Build Options
 -------------
@@ -82,10 +92,9 @@ options are --prefix and --{with,without}-readline.
 Notes
 -----
 
-- The oil executable behaves like busybox, and osh is a symlink to it.  Compare
-  oil --help vs. osh --help.
-- OSH uses a slight fork of the Python 2.7 runtime, so it should
-  compile with most popular compiler/OS combinations.
+- The oil.ovm executable behaves like busybox, and osh is a symlink to it.
+- Oil contains a fork of the Python 2.7 runtime, so it should compile with most
+  popular compiler/OS combinations.
 
 TODO
 ----

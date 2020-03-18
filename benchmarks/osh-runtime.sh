@@ -88,7 +88,8 @@ runtime-task() {
   mkdir -p $vm_out_dir $files_out_dir
 
   local -a TIME_PREFIX=(
-    $PWD/benchmarks/time.py \
+    $PWD/benchmarks/time_.py \
+    --append \
     --output $times_out \
     --field "$host" --field "$host_hash" \
     --field "$shell_name" --field "$shell_hash" \
@@ -98,9 +99,8 @@ runtime-task() {
   # Can't use array because of set -u bug!!!  Only fixed in bash 4.4.
   extra_args=''
   if test "$shell_name" = 'osh'; then
-    local pdump="${vm_out_dir}/${task_label}__parser.txt"
     local rdump="${vm_out_dir}/${task_label}__runtime.txt"
-    extra_args="--parser-mem-dump $pdump --runtime-mem-dump $rdump"
+    extra_args="--runtime-mem-dump $rdump"
 
     # Should we add a field here to say it has VM stats?
   fi
@@ -112,7 +112,6 @@ runtime-task() {
   case $task_type in
     abuild)
       # NOTE: $task_arg unused.
-
 
       "${TIME_PREFIX[@]}" -- \
         "$sh_path" $extra_args testdata/osh-runtime/abuild -h \
@@ -190,13 +189,16 @@ print-tasks() {
 
     case $sh_path in
       mksh|zsh|bin/osh)
-        log "--- Skipping $sh_path"
+        log "--- osh-runtime.sh: Skipping $sh_path"
         continue
         ;;
     esac
 
     # Need $PWD/$sh_path because we must change dirs to configure.
     case $sh_path in
+      /*)
+        # It's already absolute -- do nothing.
+        ;;
       */osh)
         sh_path=$PWD/$sh_path
         ;;
@@ -261,25 +263,15 @@ stage1() {
   local -a c=($raw_dir/$MACHINE1.*.virtual-memory)
   local -a d=($raw_dir/$MACHINE2.*.virtual-memory)
   benchmarks/virtual_memory.py osh-runtime ${c[-1]} ${d[-1]} > $vm_csv
-
-  #local raw_dir=${1:-../benchmark-data/osh-parser}
 }
 
 print-report() {
   local in_dir=$1
-  local base_url='../../web'
+
+  benchmark-html-head 'OSH Runtime Performance'
 
   cat <<EOF
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>OSH Runtime Performance</title>
-    <script type="text/javascript" src="$base_url/table/table-sort.js"></script>
-    <link rel="stylesheet" type="text/css" href="$base_url/table/table-sort.css" />
-    <link rel="stylesheet" type="text/css" href="$base_url/benchmarks.css" />
-
-  </head>
-  <body>
+  <body class="width60">
     <p id="home-link">
       <a href="/">oilshell.org</a>
     </p>
@@ -327,7 +319,7 @@ abuild-h() {
 
   echo 'status,elapsed_secs,sh_path' > $out
   for sh_path in bash dash mksh zsh $OSH_OVM; do
-    benchmarks/time.py --output $out --field "$sh_path" -- \
+    benchmarks/time_.py --append --output $out --field "$sh_path" -- \
       $sh_path benchmarks/testdata/abuild -h
   done
 }

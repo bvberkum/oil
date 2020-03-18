@@ -8,6 +8,7 @@
 set -o nounset
 set -o pipefail
 set -o errexit
+shopt -s strict:all 2>/dev/null || true  # dogfood for OSH
 
 source build/common.sh
 
@@ -65,11 +66,8 @@ app-deps() {
 
   local prefix=_build/$app_name/app-deps
 
-  # I need the right relative path for Oil
-  ln -s -f $PWD/build/app_deps.py _tmp
-
   PYTHONPATH=$pythonpath \
-    $PREPARE_DIR/python -S _tmp/app_deps.py both $main_module $prefix
+    $PREPARE_DIR/python -S build/app_deps.py both $main_module $prefix
 }
 
 # .py files to compile
@@ -82,7 +80,7 @@ py-to-compile() {
 }
 
 # For embedding in oil/bytecode.zip.
-quick-ref-manifest() {
+help-manifest() {
   local dir=$1
   for path in $dir/*; do
     echo "$path $path"  # relative path is the same
@@ -128,18 +126,18 @@ make-dotd() {
 
 extdecls() {
   for mod in "$@"; do
-    test "$mod" = readline && echo "#ifdef HAVE_READLINE"
+    test "$mod" = line_input && echo "#ifdef HAVE_READLINE"
     echo "extern void init$mod(void);"
-    test "$mod" = readline && echo "#endif"
+    test "$mod" = line_input && echo "#endif"
   done
   return 0  # because test can fail
 }
 
 initbits() {
   for mod in "$@"; do
-    test "$mod" = readline && echo "#ifdef HAVE_READLINE"
+    test "$mod" = line_input && echo "#ifdef HAVE_READLINE"
     echo "    {\"$mod\", init$mod},"
-    test "$mod" = readline && echo "#endif"
+    test "$mod" = line_input && echo "#endif"
   done
   return 0  # because test can fail
 }

@@ -1,8 +1,11 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """
 lex_gen.py
 """
 from __future__ import print_function
+
+from _devbuild.gen.id_kind_asdl import Id_str
+from _devbuild.gen.types_asdl import lex_mode_str
 
 import cStringIO
 import sys
@@ -10,8 +13,9 @@ import sre_parse
 import sre_constants
 
 from asdl import pretty  # For PLAIN_WORD_RE
-from core import meta
-from frontend import lex
+from frontend import builtin_def
+from frontend import lexer_def
+from frontend import option_def
 
 
 def PrintTree(re_tree, depth=2):
@@ -62,8 +66,8 @@ def PrintRegex(pat):
   print('\t\t]')
 
 
-# ^ means negation, - means range
-CHAR_CLASS_META = ['\\', '^', '-', ']']
+# - means range.  Note that re2c gives an error we uselessly escape \^.
+CHAR_CLASS_META = ['\\', '-', ']']
 CHAR_CLASS_META_CODES = [ord(c) for c in CHAR_CLASS_META]
 
 # re2c literals are inside double quotes, so we don't need to do anything with
@@ -123,7 +127,7 @@ def TranslateTree(re_tree, f, in_char_class=False):
     elif name == 'max_repeat':  # repetition
       min_, max_, children = arg
       # min = 0 means *, min = 1 means +
-      assert min_ in (0, 1), min_
+      #assert min_ in (0, 1), min_
       TranslateTree(children, f)
 
       if min_ == 0 and max_ == 1:
@@ -131,13 +135,14 @@ def TranslateTree(re_tree, f, in_char_class=False):
 
       elif max_ == sre_constants.MAXREPEAT:
         if min_ == 0:
-            f.write('* ')
+          f.write('* ')
         elif min_ == 1:
           f.write('+ ')
         else:
           assert 0, min_
 
       else:  # re2c also supports [0-7]{1,2} syntax
+        # note: might generated {2,2}
         f.write('{%d,%d} ' % (min_, max_))
 
     elif name == 'negate':  # ^ in [^a-z]
@@ -165,6 +170,12 @@ def TranslateTree(re_tree, f, in_char_class=False):
     elif name == 'any':  # This is the '.' character
       assert arg is None
       f.write('.')
+
+    elif name == 'subpattern':
+      _, children = arg  # Not sure what the _ is, but it works
+      f.write('(')
+      TranslateTree(children, f)
+      f.write(')')
 
     else:
       raise RuntimeError("I don't understand regex construct: %r" % name)
@@ -198,24 +209,25 @@ def TranslateRegex(pat):
 
 def TranslateSimpleLexer(func_name, lexer_def):
   print(r"""
-static inline void %s(unsigned char* line, int line_len,
-                                  int start_pos, int* id, int* end_pos) {
+static inline void %s(const unsigned char* line, int line_len,
+    int start_pos, int* id, int* end_pos) {
   assert(start_pos <= line_len);  /* caller should have checked */
 
-  unsigned char* p = line + start_pos;  /* modified by re2c */
+  const unsigned char* p = line + start_pos;  /* modified by re2c */
 
-  unsigned char* YYMARKER;  /* why do we need this? */
+  /* Echo and History lexer apparently need this, but others don't */
+  const unsigned char* YYMARKER;
 
   for (;;) {
     /*!re2c
 """ % func_name)
 
-  for is_regex, pat, token_id in lexer_def:
+  for is_regex, pat, id_ in lexer_def:
     if is_regex:
       re2c_pat = TranslateRegex(pat)
     else:
       re2c_pat = TranslateConstant(pat)
-    id_name = meta.IdName(token_id)
+    id_name = Id_str(id_).split('.')[-1]  # e.g. Undefined_Tok
     print('      %-30s { *id = id__%s; break; }' % (re2c_pat, id_name))
 
   # EARLY RETURN: Do NOT advance past the NUL terminator.
@@ -228,6 +240,41 @@ static inline void %s(unsigned char* line, int line_len,
   *end_pos = p - line;  /* relative */
 }
 """)
+
+
+def StringToInt(func_name, name_def):
+  print(r"""
+static inline void %s(const unsigned char* s, int len, int* id) {
+  const unsigned char* p = s;  /* modified by re2c */
+  const unsigned char* end = s + len;
+
+  const unsigned char* YYMARKER;
+
+  //fprintf(stderr, "*** s = %%s\n", s);
+
+  for (;;) {
+    /*!re2c
+""" % func_name)
+
+  for name, enum in name_def:
+    re2c_pat = TranslateConstant(name)
+    print('      %-30s { *id = %s; break; }' % (re2c_pat, enum))
+
+  # Not found.  * matches anything else.
+  print('      %-30s { *id = 0; return; }' % \
+      r'*')
+
+  print(r"""
+    */
+  }
+  if (p != end) {
+    //fprintf(stderr, "EXTRA CHARS\n", s);
+    *id = 0;  // Not an exact match
+  }
+}
+""")
+
+  # TODO: Check that we're at the END OF THE STRING
 
 
 def TranslateOshLexer(lexer_def):
@@ -246,33 +293,31 @@ def TranslateOshLexer(lexer_def):
   re2c:yyfill:enable = 0;  // generated code doesn't ask for more input
 */
 
-static inline void MatchOshToken(int lex_mode, unsigned char* line, int line_len,
+static inline void MatchOshToken(int lex_mode, const unsigned char* line, int line_len,
                               int start_pos, int* id, int* end_pos) {
   assert(start_pos <= line_len);  /* caller should have checked */
 
-  unsigned char* p = line + start_pos;  /* modified by re2c */
+  const unsigned char* p = line + start_pos;  /* modified by re2c */
   //printf("p: %p q: %p\n", p, q);
 
-  unsigned char* YYMARKER;  /* why do we need this? */
+  const unsigned char* YYMARKER;  /* why do we need this? */
   switch (lex_mode)  {
 """)
 
   # TODO: Should be ordered by most common?  Or will profile-directed feedback
   # help?
-
   for state, pat_list in lexer_def.iteritems():
-    # HACK: strip off '_e'
-    prefix = state.__class__.__name__[:-2]
-    print('  case %s__%s:' % (prefix, state.name))
+    # e.g. lex_mode.DQ => lex_mode__DQ
+    print('  case %s:' % lex_mode_str(state).replace('.', '__'))
     print('    for (;;) {')
     print('      /*!re2c')
 
-    for is_regex, pat, token_id in pat_list:
+    for is_regex, pat, id_ in pat_list:
       if is_regex:
         re2c_pat = TranslateRegex(pat)
       else:
         re2c_pat = TranslateConstant(pat)
-      id_name = meta.IdName(token_id)
+      id_name = Id_str(id_).split('.')[-1]  # e.g. Undefined_Tok
       print('      %-30s { *id = id__%s; break; }' % (re2c_pat, id_name))
 
     # EARLY RETURN: Do NOT advance past the NUL terminator.
@@ -330,11 +375,15 @@ static inline void MatchOshToken(int lex_mode, unsigned char* line, int line_len
 def TranslateRegexToPredicate(py_regex, func_name):
   re2c_pat = TranslateRegex(py_regex)
   print(r"""
-static inline int %s(const char* s, int len) {
-  const char* p = s;  /* modified by re2c */
-  const char* end = s + len;
+static inline int %s(const unsigned char* s, int len) {
+  const unsigned char* p = s;  /* modified by re2c */
+  const unsigned char* end = s + len;
+
+  /* MatchBraceRangeToken needs this, but others don't */
+  const unsigned char* YYMARKER;
 
   /*!re2c
+  re2c:define:YYCTYPE = "unsigned char";
   re2c:define:YYCURSOR = p;
   %-30s { return p == end; }  // Match must be anchored right, like $
   *     { return 0; }
@@ -347,22 +396,34 @@ static inline int %s(const char* s, int len) {
   # limit should be the end of string
   # line + line_len
 def main(argv):
-  # This becomes osh-lex.re2c.c.  It is compiled to osh-lex.c and then
+  # This becomes osh-lexer_def.re2c.c.  It is compiled to osh-lexer_def.c and then
   # included.
 
   action = argv[1]
   if action == 'c':
     # Print code to stdout.
-    TranslateOshLexer(lex.LEXER_DEF)
-    TranslateSimpleLexer('MatchEchoToken', lex.ECHO_E_DEF)
-    TranslateSimpleLexer('MatchGlobToken', lex.GLOB_DEF)
-    TranslateSimpleLexer('MatchPS1Token', lex.PS1_DEF)
-    TranslateRegexToPredicate(lex.VAR_NAME_RE, 'IsValidVarName')
+    TranslateOshLexer(lexer_def.LEXER_DEF)
+    TranslateSimpleLexer('MatchEchoToken', lexer_def.ECHO_E_DEF)
+    TranslateSimpleLexer('MatchGlobToken', lexer_def.GLOB_DEF)
+    TranslateSimpleLexer('MatchPS1Token', lexer_def.PS1_DEF)
+    TranslateSimpleLexer('MatchHistoryToken', lexer_def.HISTORY_DEF)
+    TranslateSimpleLexer('MatchBraceRangeToken', lexer_def.BRACE_RANGE_DEF)
+
+    # e.g. "pipefail" -> option-I::pipefail
+    pairs = [(opt.name, opt.index) for opt in option_def.All()]
+    StringToInt('MatchOption', pairs)
+
+    # e.g. "echo" -> builtin_i::echo
+    pairs = [(b.name, b.index) for b in builtin_def.All()]
+    StringToInt('MatchBuiltin', pairs)
+
+    TranslateRegexToPredicate(lexer_def.VAR_NAME_RE, 'IsValidVarName')
     TranslateRegexToPredicate(pretty.PLAIN_WORD_RE, 'IsPlainWord')
+    TranslateRegexToPredicate(lexer_def.SHOULD_HIJACK_RE, 'ShouldHijack')
 
   elif action == 'print-all':
     # Top level is a switch statement.
-    for state, pat_list in lex.LEXER_DEF.iteritems():
+    for state, pat_list in lexer_def.LEXER_DEF.iteritems():
       print(state)
       # This level is re2c patterns.
       for is_regex, pat, token_id in pat_list:
@@ -378,7 +439,7 @@ def main(argv):
     unique = set()
 
     num_regexes = 0
-    for state, pat_list in lex.LEXER_DEF.iteritems():
+    for state, pat_list in lexer_def.LEXER_DEF.iteritems():
       print(state)
       # This level is re2c patterns.
       for is_regex, pat, token_id in pat_list:

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """
 word_compile.py
 
@@ -6,13 +6,14 @@ This is called the "compile" stage because it happens after parsing, but it
 doesn't depend on any values at runtime.
 """
 
-from core import util
+from typing import Optional
+
+from _devbuild.gen.id_kind_asdl import Id, Id_t, Id_str
+from _devbuild.gen.syntax_asdl import (
+    class_literal_term, class_literal_term_t, Token
+)
+from core.pyutil import stderr_line
 from osh import string_ops
-
-from core.meta import Id
-from core.meta import runtime_asdl
-
-var_flags_e = runtime_asdl.var_flags_e
 
 
 _ONE_CHAR = {
@@ -31,6 +32,36 @@ _ONE_CHAR = {
     '"': '"',  # not sure why this is escaped within $''
 }
 
+def EvalCharLiteralForRegex(tok):
+  # type: (Token) -> Optional[class_literal_term_t]
+  """For regex char classes.
+
+  Similar logic as below.
+  """
+  id_ = tok.id
+  value = tok.val
+
+  if id_ == Id.Char_OneChar:
+    c = value[1]
+    s = _ONE_CHAR[c]
+    return class_literal_term.ByteSet(s, tok.span_id)
+
+  elif id_ == Id.Char_Hex:
+    s = value[2:]
+    i = int(s, 16)
+    return class_literal_term.ByteSet(chr(i), tok.span_id)
+
+  elif id_ in (Id.Char_Unicode4, Id.Char_Unicode8):
+    s = value[2:]
+    i = int(s, 16)
+    return class_literal_term.CodePoint(i, tok.span_id)
+
+  elif id_ == Id.Expr_Name:  # [b B] is NOT mutated
+    return None
+
+  else:
+    raise AssertionError(Id_str(id_))
+
 
 # TODO: Strict mode syntax errors:
 #
@@ -39,6 +70,7 @@ _ONE_CHAR = {
 # \d could be a syntax error -- it is better written as \\d
 
 def EvalCStringToken(id_, value):
+  # type: (Id_t, str) -> Optional[str]
   """
   This function is shared between echo -e and $''.
 
@@ -48,9 +80,12 @@ def EvalCStringToken(id_, value):
     return value
 
   elif id_ == Id.Char_BadBackslash:
-    if 1:  # TODO: error in strict mode
+    if 1:
+      # TODO:
+      # - make this an error in strict mode
+      # - improve the error message.  We don't have a span_id!
       # Either \A or trailing \ (A is not a valid backslash escape)
-      util.warn('Invalid backslash escape')
+      stderr_line('warning: Invalid backslash escape in C-style string')
     return value
 
   elif id_ == Id.Char_OneChar:
@@ -85,37 +120,4 @@ def EvalCStringToken(id_, value):
     return string_ops.Utf8Encode(i)
 
   else:
-    raise AssertionError
-
-
-#
-# Assignment
-#
-
-def ParseAssignFlags(flag_args):
-  """
-  Args:
-    flag_args looks like ['-r', '-x'] or ['-rx'], etc.
-
-  Returns:
-    A list of var_flags_e
-
-  NOTE: Any errors should be caught at PARSE TIME, not compile time.
-  """
-  flags = []
-  for arg in flag_args:
-    assert arg[0] == '-', arg
-    for char in arg[1:]:
-      if char == 'x':
-        flags.append(var_flags_e.Exported)
-      elif char == 'r':
-        flags.append(var_flags_e.ReadOnly)
-      elif char == 'A':
-        flags.append(var_flags_e.AssocArray)
-      elif char == 'g':  # useful for 'declare -Ag'
-        flags.append(var_flags_e.Global)
-      else:
-        # TODO: Throw an error?
-        pass
-  return flags
-
+    raise AssertionError()

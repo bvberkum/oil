@@ -65,10 +65,15 @@ echo ${PIPESTATUS[@]}
 
 #### |&
 stdout_stderr.py |& cat
-## stdout-json: "STDERR\nSTDOUT\n"
+## STDOUT:
+STDERR
+STDOUT
+## END
 ## status: 0
 ## N-I dash/mksh stdout-json: ""
 ## N-I dash status: 2
+## N-I osh stdout-json: ""
+## N-I osh status: 1
 
 #### ! turns non-zero into zero
 ! $SH -c 'exit 42'; echo $?
@@ -144,3 +149,19 @@ echo i=$i
 ## stdout: i=3
 ## N-I dash/mksh stdout: i=0
 
+
+#### SIGPIPE causes pipeline to die (regression for issue #295)
+cat /dev/urandom | sleep 0.1
+echo ${PIPESTATUS[@]}
+
+# hm bash gives '1 0' which seems wrong
+
+## STDOUT:
+141 0
+## END
+## BUG bash STDOUT:
+1 0
+## END
+## N-I zsh stdout:
+## N-I dash status: 2
+## N-I dash stdout-json: ""

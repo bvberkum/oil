@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 # Copyright 2016 Andy Chu. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,37 +11,37 @@ arith_parse_test.py: Tests for arith_parse.py
 
 import unittest
 
+from _devbuild.gen.types_asdl import lex_mode_e
+from core import error
 from core import test_lib
-from core import util
-from core.meta import types_asdl
-
-from osh import expr_eval
+from core import ui
+from osh import sh_expr_eval
 from osh import split
 from osh import word_eval
-from osh import state
+from core import state
 
-from frontend import parse_lib
 #from osh import arith_parse
-
-lex_mode_e = types_asdl.lex_mode_e
 
 
 def ParseAndEval(code_str):
   arena = test_lib.MakeArena('<arith_parse_test.py>')
-  parse_ctx = parse_lib.ParseContext(arena, {})
-  w_parser, _ = parse_ctx.MakeParserForCompletion(code_str, arena)
+  w_parser = test_lib.InitWordParser(code_str, arena=arena)
   w_parser._Next(lex_mode_e.Arith)  # Calling private method
   anode = w_parser._ReadArithExpr()  # need the right lex state?
   print('node:', anode)
 
-  mem = state.Mem('', [], {}, arena)
-  exec_opts = state.ExecOpts(mem, None)
-  splitter = split.SplitContext(mem)
-  ev = word_eval.CompletionWordEvaluator(mem, exec_opts, splitter, arena)
+  mem = state.Mem('', [], arena, [])
+  state.InitMem(mem, {})
+  parse_opts, exec_opts, mutable_opts = state.MakeOpts(mem, None)
 
-  arith_ev = expr_eval.ArithEvaluator(mem, exec_opts, ev, arena)
-  value = arith_ev.Eval(anode)
-  return value
+  splitter = split.SplitContext(mem)
+  errfmt = ui.ErrorFormatter(arena)
+
+  word_ev = word_eval.CompletionWordEvaluator(mem, exec_opts, splitter, errfmt)
+
+  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, arena)
+  arith_ev.word_ev = word_ev
+  return arith_ev.EvalToInt(anode)
 
 
 def testEvalExpr(e, expected):
@@ -54,7 +54,7 @@ def testEvalExpr(e, expected):
 def testSyntaxError(ex):
   try:
     actual = ParseAndEval(ex)
-  except util.ParseError as e:
+  except error.Parse as e:
     print(ex, '\t\t', e)
   else:
     raise AssertionError('Expected parse error: %r, got %r' % (ex, actual))

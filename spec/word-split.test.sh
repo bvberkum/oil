@@ -35,24 +35,24 @@ argv.py $a"$b"$c"$d"
 # http://stackoverflow.com/questions/448407/bash-script-to-receive-and-repass-quoted-parameters
 
 #### $*
-func() { argv.py -$*-; }
-func "a 1" "b 2" "c 3"
+fun() { argv.py -$*-; }
+fun "a 1" "b 2" "c 3"
 ## stdout: ['-a', '1', 'b', '2', 'c', '3-']
 
 #### "$*"
-func() { argv.py "-$*-"; }
-func "a 1" "b 2" "c 3"
+fun() { argv.py "-$*-"; }
+fun "a 1" "b 2" "c 3"
 ## stdout: ['-a 1 b 2 c 3-']
 
 #### $@
 # How does this differ from $* ?  I don't think it does.
-func() { argv.py -$@-; }
-func "a 1" "b 2" "c 3"
+fun() { argv.py -$@-; }
+fun "a 1" "b 2" "c 3"
 ## stdout: ['-a', '1', 'b', '2', 'c', '3-']
 
 #### "$@"
-func() { argv.py "-$@-"; }
-func "a 1" "b 2" "c 3"
+fun() { argv.py "-$@-"; }
+fun "a 1" "b 2" "c 3"
 ## stdout: ['-a 1', 'b 2', 'c 3-']
 
 #### empty argv
@@ -112,8 +112,8 @@ argv.py $s1
 ## stdout: ['a', 'b', '', '', 'c', 'd', 'e']
 
 #### empty $@ and $* is elided
-func() { argv.py 1 $@ $* 2; }
-func
+fun() { argv.py 1 $@ $* 2; }
+fun
 ## stdout: ['1', '2']
 
 #### unquoted empty arg is elided
@@ -220,11 +220,81 @@ argv.py X"ec  ho "
 ['Xec  ho ']
 ## END
 
+#### Empty IFS (regression for bug)
+IFS=
+echo ["$*"]
+set a b c
+echo ["$*"]
+## STDOUT:
+[]
+[abc]
+## END
+
+#### Unset IFS (regression for bug)
+set a b c
+unset IFS
+echo ["$*"]
+## STDOUT:
+[a b c]
+## END
+
+#### IFS=o (regression for bug)
+IFS=o
+echo hi
+## STDOUT:
+hi
+## END
+
+#### IFS and joining arrays
+IFS=:
+set -- x 'y z'
+argv.py "$@"
+argv.py $@
+argv.py "$*"
+argv.py $*
+## STDOUT:
+['x', 'y z']
+['x', 'y z']
+['x:y z']
+['x', 'y z']
+## END
+
+#### IFS and joining arrays by assignments
+IFS=:
+set -- x 'y z'
+
+s="$@"
+argv.py "$s"
+
+s=$@
+argv.py "$s"
+
+s"$*"
+argv.py "$s"
+
+s=$*
+argv.py "$s"
+
+# bash and mksh agree, but this doesn't really make sense to me.
+# In OSH, "$@" is the only real array, so that's why it behaves differently.
+
+## STDOUT:
+['x y z']
+['x y z']
+['x y z']
+['x:y z']
+## END
+## OK dash STDOUT:
+['x:y z']
+['x:y z']
+['x:y z']
+['x:y z']
+## END
+
 
 # TODO:
 # - unquoted args of whitespace are not elided (when IFS = null)
 # - empty quoted args are kept
-# - Test ${@:1} and so forth?
 #
 # - $* $@ with empty IFS
 # - $* $@ with custom IFS
@@ -243,3 +313,57 @@ X="X"
 Yspaces=" Y "
 
 
+#### IFS='' with $@ and $*
+set -- a 'b c'
+IFS=''
+argv.py at $@
+argv.py star $*
+
+# zsh agrees
+## STDOUT:
+['at', 'a', 'b c']
+['star', 'a', 'b c']
+## END
+## BUG dash/ash STDOUT:
+['at', 'ab c']
+['star', 'ab c']
+## END
+
+#### IFS='' with $@ and $* and printf
+set -- a 'b c'
+IFS=''
+printf '[%s]\n' $@
+printf '[%s]\n' $*
+## STDOUT:
+[a]
+[b c]
+[a]
+[b c]
+## END
+## BUG dash/ash STDOUT:
+[ab c]
+[ab c]
+## END
+
+#### IFS='' with ${a[@]} and ${a[*]}
+myarray=(a 'b c')
+IFS=''
+argv.py at ${myarray[@]}
+argv.py star ${myarray[*]}
+
+## STDOUT:
+['at', 'a', 'b c']
+['star', 'a', 'b c']
+## END
+## N-I dash/ash status: 2
+## N-I dash/ash stdout-json: ""
+
+#### Bug #628 split on : with : in literal word (CRASH)
+IFS=':'
+word='a:'
+argv.py ${word}:b
+argv.py ${word}:
+## STDOUT:
+['a', ':b']
+['a', ':']
+## END

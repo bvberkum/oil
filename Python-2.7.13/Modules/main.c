@@ -334,15 +334,6 @@ Ovm_Main(int argc, char **argv)
     cf.cf_flags = 0;
 
     setenv("_OVM_IS_BUNDLE", "1", 1);  // for .zip resources
-    setenv("_OVM_DEPS", "1", 1);  // for debug imports
-
-    // Communicate C build configuration to Python env.
-    // TODO: Could rename back to _OVM_HAVE_READLINE.
-#ifdef HAVE_READLINE
-    setenv("_HAVE_READLINE", "1", 1);
-#else
-    setenv("_HAVE_READLINE", "", 1);
-#endif
 
     // NOTE: I think we need sys.path to find runpy in the first place.  But
     // then runpy mutates sys.path again.

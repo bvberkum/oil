@@ -7,8 +7,8 @@ echo hi 1>&2
 #### <&
 # Is there a simpler test case for this?
 echo foo > $TMP/lessamp.txt
-exec 5< $TMP/lessamp.txt
-read line <&5
+exec 6< $TMP/lessamp.txt
+read line <&6
 echo "[$line]"
 ## stdout: [foo]
 
@@ -29,52 +29,63 @@ echo $FOO
 ## stdout:
 ## stderr: foo
 
-#### Redirect in assignment is invalid
-# Hm this is valid in bash and dash.  It's parsed as an assigment with a
-# redirect, which doesn't make sense.  But it's a mistake, and should be a W2
-# warning for us.
-FOO=bar 2>/dev/null
-## status: 2
-## OK bash/dash/mksh status: 0
-
 #### Redirect in assignment
 # dash captures stderr to a file here, which seems correct.  Bash doesn't and
 # just lets it go to actual stderr.
 # For now we agree with dash/mksh, since it involves fewer special cases in the
 # code.
+
 FOO=$(echo foo 1>&2) 2>$TMP/no-command.txt
 echo FILE=
 cat $TMP/no-command.txt
 echo "FOO=$FOO"
-## status: 2
-## OK dash/mksh stdout-json: "FILE=\nfoo\nFOO=\n"
-## OK dash/mksh status: 0
-## BUG bash stdout-json: "FILE=\nFOO=\n"
-## OK bash status: 0
+## STDOUT:
+FILE=
+foo
+FOO=
+## END
+## BUG bash STDOUT:
+FILE=
+FOO=
+## END
 
 #### Redirect in function body.
-func() { echo hi; } 1>&2
-func
+fun() { echo hi; } 1>&2
+fun
 ## stdout-json: ""
 ## stderr-json: "hi\n"
 
+#### Bad redirects in function body
+empty=''
+fun() { echo hi; } > $empty
+fun
+echo status=$?
+## stdout: status=1
+## OK dash stdout: status=2
+
 #### Redirect in function body is evaluated multiple times
 i=0
-func() { echo "file $i"; } 1> "$TMP/file$((i++))"
-func
-func
+fun() { echo "file $i"; } 1> "$TMP/file$((i++))"
+fun
+fun
 echo i=$i
 echo __
 cat $TMP/file0
 echo __
 cat $TMP/file1
-## stdout-json: "i=2\n__\nfile 1\n__\nfile 2\n"
+## STDOUT: 
+i=2
+__
+file 1
+__
+file 2
+## END
 ## N-I dash stdout-json: ""
 ## N-I dash status: 2
 
 #### Redirect in function body AND function call
-func() { echo hi; } 1>&2
-func 2>&1
+fun() { echo hi; } 1>&2
+fun 2>&1
 ## stdout-json: "hi\n"
 ## stderr-json: ""
 
@@ -282,6 +293,15 @@ cat $TMP/rw.txt
 ## stdout-json: "line=first\nCONTENTS\nfirst\nsecond\n"
 
 #### &>> appends stdout and stderr
+
+# Fix for flaky tests: dash behaves non-deterministically under load!  It
+# doesn't implement the behavior anyway so I don't care why.
+case $SH in
+  *dash)
+    exit 1
+    ;;
+esac
+
 echo "ok" > $TMP/f.txt
 stdout_stderr.py &>> $TMP/f.txt
 grep ok $TMP/f.txt >/dev/null && echo 'ok'
@@ -292,9 +312,63 @@ ok
 ok
 ok
 ## END
-## N-I dash STDOUT:
-ok
-STDOUT
-
-## END
+## N-I dash stdout-json: ""
 ## N-I dash status: 1
+
+#### exec redirect then various builtins
+exec 5>$TMP/log.txt
+echo hi >&5
+set -o >&5
+echo done
+## STDOUT:
+done
+## END
+
+#### >$file touches a file
+cd $TMP
+rm -f myfile
+test -f myfile
+echo status=$?
+>myfile
+test -f myfile
+echo status=$?
+## STDOUT:
+status=1
+status=0
+## END
+# regression for OSH
+## stderr-json: ""
+
+#### $(< $file) yields the contents of the file
+# note that it doesn't do this without a command sub!
+cd $TMP
+echo FOO > myfile
+foo=$(< myfile)
+echo $foo
+## STDOUT:
+FOO
+## END
+## N-I dash stdout:
+
+#### 2>&1 with no command
+cd $TMP
+( exit 42 )  # status is reset after this
+echo status=$?
+2>&1
+echo status=$?
+## STDOUT:
+status=42
+status=0
+## END
+## stderr-json: ""
+
+#### 2&>1 (is it a redirect or is it like a&>1)
+cd $TMP
+2&>1
+echo status=$?
+## STDOUT:
+status=127
+## END
+## OK mksh/dash STDOUT:
+status=0
+## END

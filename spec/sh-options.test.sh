@@ -27,48 +27,26 @@ $SH -i -c 'echo $-' | grep -q i && echo TRUE
 FALSE
 TRUE
 ## END
-
-#### sh -c
-$SH -c 'echo hi'
-## stdout: hi
-## status: 0
-
-#### empty -c input
-# had a bug here
-$SH -c ''
-## stdout-json: ""
-## status: 0
-
-#### empty stdin
-# had a bug here
-echo -n '' | $SH
-## stdout-json: ""
-## status: 0
-
-#### args are passed
-$SH -c 'argv.py "$@"' dummy a b
-## stdout: ['a', 'b']
-
-#### args that look like flags are passed after script
-script=$TMP/sh1.sh
-echo 'argv.py "$@"' > $script
-chmod +x $script
-$SH $script --help --help -h
-## stdout: ['--help', '--help', '-h']
-
-#### args that look like flags are passed after -c
-$SH -c 'argv.py "$@"' --help --help -h
-## stdout: ['--help', '-h']
-
-#### pass short options on command line
+#### pass short options like sh -e
 $SH -e -c 'false; echo status=$?'
 ## stdout-json: ""
 ## status: 1
 
-#### pass long options on command line
+#### pass long options like sh -o errexit
 $SH -o errexit -c 'false; echo status=$?'
 ## stdout-json: ""
 ## status: 1
+
+#### pass shopt options like sh -O nullglob
+$SH +O nullglob -c 'echo foo *.nonexistent bar'
+$SH -O nullglob -c 'echo foo *.nonexistent bar'
+## STDOUT:
+foo *.nonexistent bar
+foo bar
+## END
+## N-I dash/mksh stdout-json: ""
+## N-I dash status: 2
+## N-I mksh status: 1
 
 #### can continue after unknown option
 # dash and mksh make this a fatal error no matter what.
@@ -97,6 +75,36 @@ echo $?
 ## STDOUT:
 0
 0
+## END
+
+#### vi and emacs are mutually exclusive
+show() {
+  shopt -o -p | egrep 'emacs$|vi$'
+  echo ___
+};
+show
+
+set -o emacs
+show
+
+set -o vi
+show
+
+## STDOUT:
+set +o emacs
+set +o vi
+___
+set -o emacs
+set +o vi
+___
+set +o emacs
+set -o vi
+___
+## END
+## N-I dash/mksh STDOUT:
+___
+___
+___
 ## END
 
 #### nounset
@@ -164,37 +172,73 @@ set -n
 echo 2
 set +n
 echo 3
-## stdout-json: "1\n"
+# osh doesn't work because it only checks -n in bin/oil.py?
+## STDOUT:
+1
+## END
 ## status: 0
 
 #### pipefail
 # NOTE: the sleeps are because osh can fail non-deterministically because of a
 # bug.  Same problem as PIPESTATUS.
-{ sleep 0.01; exit 9; } | { sleep 0.02; exit 2; } | { sleep 0.03; exit 0; }
+{ sleep 0.01; exit 9; } | { sleep 0.02; exit 2; } | { sleep 0.03; }
 echo $?
 set -o pipefail
-{ sleep 0.01; exit 9; } | { sleep 0.02; exit 2; } | { sleep 0.03; exit 0; }
+{ sleep 0.01; exit 9; } | { sleep 0.02; exit 2; } | { sleep 0.03; }
 echo $?
-## stdout-json: "0\n2\n"
+## STDOUT:
+0
+2
+## END
 ## status: 0
-## N-I dash stdout-json: "0\n"
+## N-I dash STDOUT:
+0
+## END
 ## N-I dash status: 2
 
-#### shopt -p -o
+#### shopt -p -o prints 'set' options
 shopt -po nounset
-set -u
+set -o nounset
 shopt -po nounset
-## stdout-json: "set +o nounset\nset -o nounset\n"
+## STDOUT: 
+set +o nounset
+set -o nounset
+## END
 ## N-I dash/mksh stdout-json: ""
 ## N-I dash/mksh status: 127
 
-#### shopt -p
+#### shopt -p prints 'shopt' options
 shopt -p nullglob
 shopt -s nullglob
 shopt -p nullglob
-## stdout-json: "shopt -u nullglob\nshopt -s nullglob\n"
+## STDOUT:
+shopt -u nullglob
+shopt -s nullglob
+## END
 ## N-I dash/mksh stdout-json: ""
 ## N-I dash/mksh status: 127
+
+#### shopt with no flags prints options
+cd $TMP
+
+# print specific options.  OSH does it in a different format.
+shopt nullglob failglob > one.txt
+wc -l one.txt
+grep -o nullglob one.txt
+grep -o failglob one.txt
+
+# print all options
+shopt | grep nullglob | wc -l
+## STDOUT:
+2 one.txt
+nullglob
+failglob
+1
+## END
+## N-I dash/mksh STDOUT:
+0 one.txt
+0
+## END
 
 #### noclobber off
 set -o errexit
@@ -235,13 +279,118 @@ echo status=$?
 ## stdout: status=1
 ## N-I dash/mksh stdout: status=0
 
+# Setting a readonly variable in osh is a hard failure.
+## OK osh status: 1
+## OK osh stdout-json: ""
+
 #### set -o lists options
-set -o | grep set
-## status: 0
+# NOTE: osh doesn't use the same format yet.
+set -o | grep -o noexec
+## STDOUT:
+noexec
+## END
 
 #### set without args lists variables
-set | grep PWD
+__GLOBAL=g
+f() {
+  local __mylocal=L
+  local __OTHERLOCAL=L
+  __GLOBAL=mutated
+  set | grep '^__'
+}
+g() {
+  local __var_in_parent_scope=D
+  f
+}
+g
 ## status: 0
+## STDOUT:
+__GLOBAL='mutated'
+__OTHERLOCAL='L'
+__mylocal='L'
+__var_in_parent_scope='D'
+## END
+## OK bash STDOUT:
+__GLOBAL=mutated
+__OTHERLOCAL=L
+__mylocal=L
+__var_in_parent_scope=D
+## END
+## OK mksh STDOUT:
+__GLOBAL=mutated
+__var_in_parent_scope=D
+__OTHERLOCAL=L
+__mylocal=L
+## END
+
+#### 'set' and 'eval' round trip
+
+# NOTE: not testing arrays and associative arrays!
+_space='[ ]'
+_whitespace=$'[\t\r\n]'
+_sq="'single quotes'"
+_backslash_dq="\\ \""
+_unicode=$'[\u03bc]'
+
+# Save the variables
+varfile=$TMP/vars-$(basename $SH).txt
+
+set | grep '^_' > "$varfile"
+
+# Unset variables
+unset _space _whitespace _sq _backslash_dq _unicode
+echo [ $_space $_whitespace $_sq $_backslash_dq $_unicode ]
+
+# Restore them
+
+. $varfile
+echo "Code saved to $varfile" 1>&2  # for debugging
+
+test "$_space" = '[ ]' && echo OK
+test "$_whitespace" = $'[\t\r\n]' && echo OK
+test "$_sq" = "'single quotes'" && echo OK
+test "$_backslash_dq" = "\\ \"" && echo OK
+test "$_unicode" = $'[\u03bc]' && echo OK
+
+## STDOUT:
+[ ]
+OK
+OK
+OK
+OK
+OK
+## END
+
+#### set without args and array variables (not in OSH)
+declare -a __array
+__array=(1 2 '3 4')
+set | grep '^__'
+## STDOUT:
+__array=([0]="1" [1]="2" [2]="3 4")
+## END
+## OK mksh STDOUT:
+__array[0]=1
+__array[1]=2
+__array[2]='3 4'
+## N-I dash stdout-json: ""
+## N-I dash status: 2
+## N-I osh stdout-json: ""
+## N-I osh status: 1
+
+#### set without args and assoc array variables (not in OSH)
+typeset -A __assoc
+__assoc['k e y']='v a l'
+__assoc[a]=b
+set | grep '^__'
+## STDOUT:
+__assoc=(["k e y"]="v a l" [a]="b" )
+## END
+## N-I mksh stdout-json: ""
+## N-I mksh status: 1
+## N-I dash stdout-json: ""
+## N-I dash status: 1
+## N-I osh stdout-json: ""
+## N-I osh status: 1
 
 #### shopt -q
 shopt -q nullglob
@@ -286,4 +435,162 @@ invalidZZ=1
 ## N-I dash/mksh STDOUT:
 invalidZZ=127
 ## END
+
+#### shopt -s strict:all
+n=2
+
+show-strict() {
+  shopt -p | grep 'strict_' | head -n $n
+  echo -
+}
+
+show-strict
+shopt -s strict:all
+show-strict
+shopt -u strict_arith
+show-strict
+## STDOUT:
+shopt -u strict_argv
+shopt -u strict_arith
+-
+shopt -s strict_argv
+shopt -s strict_arith
+-
+shopt -s strict_argv
+shopt -u strict_arith
+-
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+## N-I bash/mksh STDOUT:
+-
+-
+-
+## END
+
+#### shopt allows for backward compatibility like bash
+
+# doesn't have to be on, but just for testing
+set -o errexit
+
+shopt -p nullglob || true  # bash returns 1 here?  Like -q.
+
+# This should set nullglob, and return 1, which can be ignored
+shopt -s nullglob strict_OPTION_NOT_YET_IMPLEMENTED 2>/dev/null || true
+echo status=$?
+
+shopt -p nullglob || true
+
+## STDOUT:
+shopt -u nullglob
+status=0
+shopt -s nullglob
+## END
+## N-I dash/mksh STDOUT:
+status=0
+## END
+## N-I dash/mksh status: 0
+
+#### shopt -p validates option names
+shopt -p nullglob invalid failglob
+echo status=$?
+# same thing as -p, slightly different format in bash
+shopt nullglob invalid failglob > $TMP/out.txt
+status=$?
+sed --regexp-extended 's/\s+/ /' $TMP/out.txt  # make it easier to assert
+echo status=$status
+## STDOUT:
+shopt -u nullglob
+status=2
+shopt -u nullglob
+status=2
+## END
+## OK bash STDOUT:
+shopt -u nullglob
+shopt -u failglob
+status=1
+nullglob off
+failglob off
+status=1
+## END
+## N-I dash/mksh STDOUT:
+status=127
+status=127
+## END
+
+#### shopt -p -o validates option names
+shopt -p -o errexit invalid nounset
+echo status=$?
+## STDOUT:
+set +o errexit
+status=2
+## END
+## OK bash STDOUT:
+set +o errexit
+set +o nounset
+status=1
+## END
+## N-I dash/mksh STDOUT:
+status=127
+## END
+
+#### stubbed out bash options
+for name in foo autocd cdable_vars checkwinsize; do
+  shopt -s $name
+  echo $?
+done
+## STDOUT:
+2
+0
+0
+0
+## END
+## OK bash STDOUT:
+1
+0
+0
+0
+## END
+## OK dash/mksh STDOUT:
+127
+127
+127
+127
+## END
+
+#### shopt -s nounset doesn't work (may relax this later)
+case $SH in
+  *dash|*mksh)
+    echo N-I
+    exit
+    ;;
+esac
+shopt -s nounset
+echo status=$?
+# get rid of extra space in bash
+set -o | grep nounset | sed 's/[ \t]\+/ /g'
+
+## STDOUT:
+status=2
+set +o nounset
+## END
+## OK bash STDOUT:
+status=1
+nounset off
+# END
+## N-I dash/mksh STDOUT:
+N-I
+## END
+
+#### no-ops not in shopt -p output
+shopt -p | grep xpg
+echo --
+## STDOUT:
+--
+## END
+## OK bash STDOUT:
+shopt -u xpg_echo
+--
+## END
+
 

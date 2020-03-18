@@ -2,22 +2,22 @@
  * Python interface to libc functions.
  */
 
+// - Enable GNU extensions in fnmatch.h for extended glob.
+// - It's also apparently needed for wchar.h in combination with Python.
+//   https://github.com/python-pillow/Pillow/issues/1850
+//   - It's currently hard-coded in pyconfig.h.
+#define _GNU_SOURCE 1
+
 #include <stdarg.h>  // va_list, etc.
 #include <stdio.h>  // printf
 #include <limits.h>
+#include <wchar.h>
 #include <stdlib.h>
-
-// Enable GNU extensions in fnmatch.h.
-// TODO: Need a configure option for this.
-#define _GNU_SOURCE 1
-
+#include <sys/ioctl.h>
+#include <locale.h>
 #include <fnmatch.h>
 #include <glob.h>
-#ifdef __FreeBSD__
-#include <gnu/posix/regex.h>
-#else
 #include <regex.h>
-#endif
 
 #include <Python.h>
 
@@ -71,7 +71,15 @@ func_fnmatch(PyObject *self, PyObject *args) {
   int flags = 0;
 #endif
 
+  const char *old_locale = setlocale(LC_CTYPE, NULL);
+  if (setlocale(LC_CTYPE, "") == NULL) {
+	  PyErr_SetString(PyExc_SystemError, "Invalid locale for LC_CTYPE");
+	  return NULL;
+  }
+
   int ret = fnmatch(pattern, str, flags);
+
+  setlocale(LC_CTYPE, old_locale);
 
   switch (ret) {
   case 0:
@@ -138,7 +146,9 @@ func_glob(PyObject *self, PyObject *args) {
     break;
   }
   if (err_str) {
-    fprintf(stderr, "func_glob: %s: %s\n", pattern, err_str);
+    //fprintf(stderr, "func_glob: %s: %s\n", pattern, err_str);
+    PyErr_SetString(PyExc_RuntimeError, err_str);
+    return NULL;
   }
 
   // http://stackoverflow.com/questions/3512414/does-this-pylist-appendlist-py-buildvalue-leak
@@ -313,6 +323,13 @@ func_regex_first_group_match(PyObject *self, PyObject *args) {
   regex_t pat;
   regmatch_t m[NMATCH];
 
+  const char *old_locale = setlocale(LC_CTYPE, NULL);
+
+  if (setlocale(LC_CTYPE, "") == NULL) {
+	  PyErr_SetString(PyExc_SystemError, "Invalid locale for LC_CTYPE");
+	  return NULL;
+  }
+
   // Could have been checked by regex_parse for [[ =~ ]], but not for glob
   // patterns like ${foo/x*/y}.
 
@@ -327,6 +344,8 @@ func_regex_first_group_match(PyObject *self, PyObject *args) {
   // Match at offset 'pos'
   int result = regexec(&pat, str + pos, NMATCH, m, 0 /*flags*/);
   regfree(&pat);
+
+  setlocale(LC_CTYPE, old_locale);
 
   if (result != 0) {
     Py_RETURN_NONE;  // no match
@@ -355,7 +374,7 @@ func_print_time(PyObject *self, PyObject *args) {
 // A copy of socket.gethostname() from socketmodule.c.  That module brings in
 // too many dependencies.
 
-static PyObject *socket_error;
+static PyObject *errno_error;
 
 static PyObject *
 socket_gethostname(PyObject *self, PyObject *unused)
@@ -367,9 +386,45 @@ socket_gethostname(PyObject *self, PyObject *unused)
     //res = gethostname(buf, 0);  // For testing errors
     Py_END_ALLOW_THREADS
     if (res < 0)
-        return PyErr_SetFromErrno(socket_error);
+        return PyErr_SetFromErrno(errno_error);
     buf[sizeof buf - 1] = '\0';
     return PyString_FromString(buf);
+}
+
+static PyObject *
+func_get_terminal_width(PyObject *self, PyObject *unused) {
+  struct winsize w;
+  int res;
+  res = ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+  if (res < 0)
+    return PyErr_SetFromErrno(errno_error);
+  return PyLong_FromLong(w.ws_col);
+}
+
+static PyObject *
+func_wcswidth(PyObject *self, PyObject *args){
+    char *string;
+    if (!PyArg_ParseTuple(args, "s", &string)) {
+        return NULL;
+    }
+
+    const char *old_locale = setlocale(LC_CTYPE, NULL);
+    if (setlocale(LC_CTYPE, "en_US.UTF-8") == NULL) {
+        PyErr_SetString(PyExc_SystemError, "en_US.UTF-8 is not a valid locale");
+        return NULL;
+    }
+    int len = mbstowcs(NULL, string, 0);
+    if (len == -1) {
+        PyErr_SetString(PyExc_UnicodeError, "mbstowcs error: Invalid UTF-8 string");
+        setlocale(LC_CTYPE, old_locale);
+        return NULL;
+    }
+    wchar_t unicode[len + 1];
+    mbstowcs(unicode, string, len + 1);
+    int width = wcswidth(unicode, len + 1);
+
+    setlocale(LC_CTYPE, old_locale);
+    return PyInt_FromLong(width);
 }
 
 #ifdef OVM_MAIN
@@ -403,12 +458,18 @@ static PyMethodDef methods[] = {
   {"print_time", func_print_time, METH_VARARGS, ""},
 
   {"gethostname", socket_gethostname, METH_NOARGS, ""},
+
+  // ioctl() to get the terminal width.
+  {"get_terminal_width", func_get_terminal_width, METH_NOARGS, ""},
+
+  // Get the display width of a string. Throw an exception if the string is invalid UTF8.
+  {"wcswidth", func_wcswidth, METH_VARARGS, ""},
   {NULL, NULL},
 };
 #endif
 
 void initlibc(void) {
   Py_InitModule("libc", methods);
-  socket_error = PyErr_NewException("socket.error",
+  errno_error = PyErr_NewException("libc.error",
                                     PyExc_IOError, NULL);
 }

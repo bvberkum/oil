@@ -10,14 +10,24 @@ set -o pipefail
 set -o errexit
 
 filter-py() {
-  grep -E -v '__init__.py$|_test.py$'
+  grep -E -v '__init__.py$|_gen.py|_test.py|_tests.py$'
 }
 
-# Oil-only would exclude core/legacy.py, etc.
-oil-osh-files() {
-  { ls {bin,oil_lang,osh,core,frontend}/*.py \
-       native/*.c {frontend,osh}/*.asdl;
-  } | filter-py | grep -E -v '_gen.py$|test_lib.py'
+readonly -a ASDL_FILES=( {frontend,osh}/*.asdl )
+
+# OSH and common
+osh-files() {
+  # Exclude:
+  # - line_input.c because I didn't write it.  It still should be minimized.
+  # - code generators
+  # - test library
+
+  ls bin/oil.py {osh,core,frontend}/*.py native/*.c "${ASDL_FILES[@]}" \
+    | filter-py | grep -E -v 'posixmodule.c$|line_input.c$|_gen.py$|test_lib.py$'
+}
+
+oil-lang-files() {
+  ls oil_lang/*.{py,pgen2} | filter-py 
 }
 
 # cloc doesn't understand ASDL files.
@@ -43,33 +53,39 @@ print "%5d %s" % (total, "total")
 ' "$@"
 }
 
-oil-osh-cloc() {
-  echo 'OIL AND OSH (non-blank non-comment lines)'
+osh-cloc() {
+  echo 'OSH (non-blank non-comment lines)'
   echo
-  oil-osh-files | xargs cloc --quiet "$@"
+  osh-files | xargs cloc --quiet "$@"
 
   # NOTE: --csv option could be parsed into HTML.
   # Or just sum with asdl-cloc!
 
   echo
   echo 'ASDL SCHEMAS (non-blank non-comment lines)'
-  asdl-cloc */*.asdl
+  asdl-cloc "${ASDL_FILES[@]}"
 }
 
 # TODO: Sum up all the support material.  It's more than Oil itself!  Turn
 # everything into an array.  An hash table of arrays would be useful here.
 all() {
+
   echo 'BUILD AUTOMATION'
-  wc -l build/*.{mk,sh,py} Makefile *.mk configure install |
-    filter-py | sort --numeric
+  ls build/*.{mk,sh,py} Makefile *.mk configure install |
+    filter-py | xargs wc -l | sort --numeric
   echo
 
   echo 'TEST AUTOMATION'
-  wc -l test/*.{sh,py,R} | filter-py | sort --numeric
+  ls test/*.{sh,py,R} | filter-py | grep -v jsontemplate.py |
+    xargs wc -l | sort --numeric
   echo
 
   echo 'RELEASE AUTOMATION'
-  wc -l devtools/release.sh | sort --numeric
+  wc -l devtools/release*.sh | sort --numeric
+  echo
+
+  echo 'SERVICES'
+  wc -l services/*.{sh,py} | sort --numeric
   echo
 
   echo 'BENCHMARKS'
@@ -93,11 +109,25 @@ all() {
     xargs wc -l | sort --numeric
   echo
 
-  echo 'CODE GENERATORS'
-  wc -l asdl/gen_*.py */*_gen.py | sort --numeric
+  echo 'MYCPP'
+  ls mycpp/*.py | filter-py | xargs wc -l | sort --numeric
   echo
 
-  echo 'GENERATED CODE'
+  echo 'PGEN2 (parser generator)'
+  ls pgen2/*.py | filter-py | xargs wc -l | sort --numeric
+  echo
+
+  echo 'DOC TOOLS'
+  ls {doctools,lazylex}/*.py | filter-py | xargs wc -l | sort --numeric
+  echo
+
+  # NOTE: OPy is counted separately.
+
+  echo 'CODE GENERATORS'
+  wc -l */*_gen.py | sort --numeric
+  echo
+
+  echo 'GENERATED CODE (for app bundle)'
   wc -l _devbuild/gen/*.{py,h} | sort --numeric
   echo
 
@@ -110,7 +140,7 @@ all() {
   echo
 
   echo 'BORROWED FROM STDLIB'
-  wc -l pylib/*.py | filter-py | sort --numeric
+  ls pylib/*.py | filter-py | xargs wc -l | sort --numeric
   echo
 
   echo 'OTHER UNIT TESTS'
@@ -118,16 +148,18 @@ all() {
   echo
 
   echo 'OIL UNIT TESTS'
-  wc -l {oil_lang,osh,frontend,core,ovm2,native,tools}/*_test.py | sort --numeric
+  wc -l {osh,frontend,core,native,tools}/*_test.py | sort --numeric
   echo
 
-  echo 'OIL AND OSH'
-  oil-osh-files | xargs wc -l | sort --numeric
+  echo 'OSH (and common libraries)'
+  osh-files | xargs wc -l | sort --numeric
   echo
 
-  echo 'OVM2'
-  wc -l ovm2/*.{py,cc} | filter-py | sort --numeric
+  echo 'Oil Language'
+  oil-lang-files | xargs wc -l | sort --numeric
   echo
+
+  cpp
 
   return
   # TODO: Import docs
@@ -136,6 +168,22 @@ all() {
   wc -l README.md doc/* | sort --numeric
   echo
 }
+
+cpp() {
+  # NOTE: Could exclude .re2c.h file
+  echo '[ C++ ] Generated Code'
+  wc -l _build/cpp/*.{cc,h} _devbuild/gen/*.h | sort --numeric
+  echo
+
+  echo '[ C++ ] Hand-Written Code'
+  wc -l cpp/*.{cc,h} | sort --numeric
+  echo
+
+  echo '[ C++ ] mycpp Runtime'
+  wc -l mycpp/mylib.{cc,h} | sort --numeric
+  echo
+}
+
 
 # count instructions, for fun
 instructions() {
@@ -177,7 +225,7 @@ _python-symbols() {
   local out=${out_dir}/${name}-symbols.txt
 
   # Run this from the repository root.
-  PYTHONPATH=. CALLGRAPH=1 $main | tee $out
+  PYTHONPATH='.:vendor/' CALLGRAPH=1 $main | tee $out
 
   wc -l $out
   echo 
@@ -218,4 +266,6 @@ NotImplementedError() {
   grep NotImplementedError */*.py
 }
 
-"$@"
+if test $(basename $0) = 'source-code.sh'; then
+  "$@"
+fi

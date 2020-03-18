@@ -2,6 +2,7 @@
 *.pyc
 tags
 .vagrant
+.mypy_cache/
 _chroot/
 _tmp/
 _bin/
@@ -9,8 +10,24 @@ _build/
 _devbuild/
 !opy/_regtest/src/_devbuild/
 _deps/
+# for mycpp
+_gen/
 _release/
-libc.so
 fastlex.so
+libc.so
+line_input.so
+posix_.so
+yajl.so
 # Python build support
 build/temp.*
+
+# my own automation
+local.sh  
+
+NOTES*.txt
+*/NOTES*.txt
+TODO*.txt
+# uftrace creates this
+uftrace.data
+release-*.txt
+asdl.txt

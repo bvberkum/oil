@@ -1,9 +1,39 @@
-#!/bin/bash
+# builtin-trap.test.sh
 
 #### trap -l
 trap -l | grep INT >/dev/null
 ## status: 0
 ## N-I dash/mksh status: 1
+
+#### trap accepts/ignores --
+trap -- 'echo hi' EXIT
+echo done
+## STDOUT:
+done
+hi
+## END
+
+#### trap 'echo hi' KILL (regression test, caught by smoosh suite)
+trap 'echo hi' 9
+echo status=$?
+trap 'echo hi' KILL
+echo status=$?
+trap 'echo hi' STOP
+echo status=$?
+trap 'echo hi' TERM
+echo status=$?
+## STDOUT:
+status=0
+status=0
+status=0
+status=0
+## END
+## OK osh STDOUT:
+status=1
+status=1
+status=1
+status=0
+## END
 
 #### trap -p
 trap 'echo exit' EXIT
@@ -50,7 +80,7 @@ echo status=$?
 ## BUG dash/bash status: 0
 ## BUG dash/bash stdout: status=0
 
-#### trap EXIT
+#### trap EXIT calling exit
 cleanup() {
   echo "cleanup [$@]"
   exit 42
@@ -58,6 +88,28 @@ cleanup() {
 trap 'cleanup x y z' EXIT
 ## stdout: cleanup [x y z]
 ## status: 42
+
+#### trap EXIT return status ignored
+cleanup() {
+  echo "cleanup [$@]"
+  return 42
+}
+trap 'cleanup x y z' EXIT
+## stdout: cleanup [x y z]
+## status: 0
+
+#### trap EXIT with PARSE error
+trap 'echo FAILED' EXIT
+for
+## stdout: FAILED
+## status: 2
+## OK mksh status: 1
+
+#### trap EXIT with PARSE error and explicit exit
+trap 'echo FAILED; exit 0' EXIT
+for
+## stdout: FAILED
+## status: 0
 
 #### trap DEBUG
 debuglog() {
@@ -142,15 +194,43 @@ err [x y] 1
 3
 ## END
 
-#### trap with PARSE error (implicit exit)
-trap 'echo FAILED' EXIT
-for
-## stdout: FAILED
-## status: 2
-## OK mksh status: 1
-
-#### trap with PARSE error with explicit exit
-trap 'echo FAILED; exit 0' EXIT
-for
-## stdout: FAILED
+#### trap 0 is equivalent to EXIT
+# not sure why this is, but POSIX wants it.
+trap 'echo EXIT' 0
+echo status=$?
+trap - EXIT
+echo status=$?
 ## status: 0
+## STDOUT:
+status=0
+status=0
+## END
+
+#### trap 1 is equivalent to SIGHUP; HUP is equivalent to SIGHUP
+trap 'echo HUP' SIGHUP
+echo status=$?
+trap 'echo HUP' HUP
+echo status=$?
+trap 'echo HUP' 1
+echo status=$?
+trap - HUP
+echo status=$?
+## status: 0
+## STDOUT:
+status=0
+status=0
+status=0
+status=0
+## END
+## N-I dash STDOUT:
+status=1
+status=0
+status=0
+status=0
+## END
+
+#### eval in the exit trap (regression for issue #293)
+trap 'eval "echo hi"' 0
+## STDOUT:
+hi
+## END

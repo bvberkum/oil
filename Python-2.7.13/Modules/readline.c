@@ -11,6 +11,39 @@
 #include <errno.h>
 #include <sys/time.h>
 
+/* ------------------------------------------------------------------------- */
+
+/* OVM_MAIN: This section copied from autotool-generated pyconfig.h. 
+ * We're not detecting any of it in Oil's configure script.  They are for
+ * ancient readline versions.
+ * */
+
+/* Define if you have readline 2.1 */
+#define HAVE_RL_CALLBACK 1
+
+/* Define if you can turn off readline's signal handling. */
+#define HAVE_RL_CATCH_SIGNAL 1
+
+/* Define if you have readline 2.2 */
+#define HAVE_RL_COMPLETION_APPEND_CHARACTER 1
+
+/* Define if you have readline 4.0 */
+#define HAVE_RL_COMPLETION_DISPLAY_MATCHES_HOOK 1
+
+/* Define if you have readline 4.2 */
+#define HAVE_RL_COMPLETION_MATCHES 1
+
+/* Define if you have rl_completion_suppress_append */
+#define HAVE_RL_COMPLETION_SUPPRESS_APPEND 1
+
+/* Define if you have readline 4.0 */
+#define HAVE_RL_PRE_INPUT_HOOK 1
+
+/* Define if you have readline 4.0 */
+#define HAVE_RL_RESIZE_TERMINAL 1
+
+/* ------------------------------------------------------------------------- */
+
 #if defined(HAVE_SETLOCALE)
 /* GNU readline() mistakenly sets the LC_CTYPE locale.
  * This is evil.  Only the user or the app's main() should do this!

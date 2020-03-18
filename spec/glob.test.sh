@@ -48,17 +48,17 @@ echo "[ $f ]"
 ## stdout: [ _tmp/*.A ]
 
 #### glob after "$@" expansion
-func() {
+fun() {
   echo "$@"
 }
-func '_tmp/*.B'
+fun '_tmp/*.B'
 ## stdout: _tmp/*.B
 
 #### glob after $@ expansion
-func() {
+fun() {
   echo $@
 }
-func '_tmp/*.B'
+fun '_tmp/*.B'
 ## stdout: _tmp/b.B
 
 #### no glob after ~ expansion
@@ -113,6 +113,7 @@ touch _tmp/foo.-
 echo _tmp/*.[[:punct:]] _tmp/*.[[:punct\:]]
 ## stdout: _tmp/foo.- _tmp/*.[[:punct:]]
 ## BUG mksh stdout: _tmp/*.[[:punct:]] _tmp/*.[[:punct:]]
+## BUG ash stdout: _tmp/foo.- _tmp/foo.-
 
 #### Redirect to glob, not evaluated
 # This writes to *.F, not foo.F
@@ -157,13 +158,38 @@ argv.py _tmp/spec-tmp/*.nonexistent
 ## stdout-json: "['_tmp/spec-tmp/*.nonexistent']\n[]\n"
 ## N-I dash/mksh/ash stdout-json: "['_tmp/spec-tmp/*.nonexistent']\n['_tmp/spec-tmp/*.nonexistent']\n"
 
-#### shopt -s failglob
+#### shopt -s failglob in command context
 argv.py *.ZZ
 shopt -s failglob
 argv.py *.ZZ  # nothing is printed, not []
 echo status=$?
-## stdout-json: "['*.ZZ']\nstatus=1\n"
-## N-I dash/mksh/ash stdout-json: "['*.ZZ']\n['*.ZZ']\nstatus=0\n"
+## STDOUT:
+['*.ZZ']
+status=1
+## END
+## N-I dash/mksh/ash STDOUT:
+['*.ZZ']
+['*.ZZ']
+status=0
+## END
+
+#### shopt -s failglob in loop context
+for x in *.ZZ; do echo $x; done
+echo status=$?
+shopt -s failglob
+for x in *.ZZ; do echo $x; done
+echo status=$?
+## STDOUT:
+*.ZZ
+status=0
+status=1
+## END
+## N-I dash/mksh/ash STDOUT:
+*.ZZ
+status=0
+*.ZZ
+status=0
+## END
 
 #### Don't glob flags on file system with GLOBIGNORE
 # This is a bash-specific extension.
@@ -247,3 +273,37 @@ echo ${x//[^[z]/<}  # also accepted
 ## END
 ## N-I dash stdout-json: ""
 ## N-I dash status: 2
+
+#### Glob unicode char
+
+touch $TMP/__a__
+touch $TMP/__μ__
+cd $TMP
+
+echo __?__ 
+
+## STDOUT:
+__a__ __μ__
+## END
+## BUG dash/mksh/ash STDOUT:
+__a__
+## END
+# note: zsh also passes this, but it doesn't run with this file.
+
+#### dotglob (bash option that dashglob is roughly consistent with)
+mkdir -p $TMP/dotglob
+cd $TMP/dotglob
+touch .foorc other
+
+echo *
+shopt -s dotglob
+echo *
+## STDOUT:
+other
+.foorc other
+## END
+## N-I dash/mksh/ash STDOUT:
+other
+other
+## END
+

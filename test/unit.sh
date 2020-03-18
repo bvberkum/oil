@@ -13,11 +13,11 @@
 set -o nounset
 set -o pipefail
 set -o errexit
+shopt -s strict:all 2>/dev/null || true  # dogfood for OSH
 
 source test/common.sh
 
-export PYTHONPATH=.  # current dir
-export ASDL_TYPE_CHECK=1
+export PYTHONPATH='.:vendor'  # repo root and vendor subdir
 
 # For auto-complete
 unit() {
@@ -43,13 +43,22 @@ banner() {
   echo -----
 }
 
+readonly -a UNIT_TESTS=( {asdl,build,core,doctools,frontend,lazylex,mycpp,native,oil_lang,osh,pylib,test,tools}/*_test.py )
+
 tests-to-run() {
-  # TODO: Add opy.
-  for t in {build,test,native,asdl,core,osh,frontend,pylib,ovm2,test,tools}/*_test.py; do
+  local minimal=${1:-}
+
+  for t in "${UNIT_TESTS[@]}"; do
     # For Travis after build/dev.sh minimal: if we didn't build fastlex.so,
     # then skip a unit test that will fail.
-    if test $t = 'native/fastlex_test.py' && ! test -e 'fastlex.so'; then
-      continue
+
+    if test -n "$minimal"; then
+      if test $t = 'native/fastlex_test.py' && ! test -e 'fastlex.so'; then
+        continue
+      fi
+      if test $t = 'doctools/cmark_test.py' && ! test -e '/usr/local/lib/cmark.so'; then
+        continue
+      fi
     fi
 
     echo $t
@@ -73,9 +82,18 @@ run-test-and-maybe-abort() {
 all() {
   # For testing
   #export FASTLEX=0
-  time tests-to-run | xargs -n 1 -- $0 run-test-and-maybe-abort
+  time tests-to-run "$@" | xargs -n 1 -- $0 run-test-and-maybe-abort
   echo
   echo "All unit tests passed."
+}
+
+travis() {
+  if test -n "${TRAVIS_SKIP:-}"; then
+    echo "TRAVIS_SKIP: Skipping $0"
+    return
+  fi
+
+  all minimal
 }
 
 # Run all unit tests in one process.
@@ -108,7 +126,7 @@ run-test-and-log() {
   local log=_tmp/unit/$t.txt
   mkdir -p $(dirname $log)
 
-  benchmarks/time.py --out $tasks_csv \
+  benchmarks/time_.py --append --out $tasks_csv \
     --field $t --field "$t.txt" -- \
     $t >$log 2>&1
 }
@@ -126,7 +144,13 @@ run-all-and-log() {
   # in NullSchema.
 
   echo 'status,elapsed_secs,test,test_HREF' > $tasks_csv
-  time tests-to-run | xargs -n 1 -- $0 run-test-and-log $tasks_csv || status=1
+
+  # There are no functions here, so disabline errexit is safe.
+  # Note: In Oil, this could use shopt { }.
+  set +o errexit
+  time tests-to-run | xargs -n 1 -- $0 run-test-and-log $tasks_csv
+  status=$?
+  set -o errexit
 
   if test $status -ne 0; then
     cat $tasks_csv
@@ -143,8 +167,6 @@ run-all-and-log() {
 }
 
 
-source benchmarks/common.sh
-
 # TODO: It would be nice to have timestamps of the underlying CSV files and
 # timestamp of running the report.  This is useful for benchmarks too.
 
@@ -152,25 +174,23 @@ print-report() {
   local in_dir=${1:-_tmp/unit}
   local base_url='../../web'
 
+  html-head --title 'Oil Unit Test Results' \
+    "$base_url/table/table-sort.js" \
+    "$base_url/table/table-sort.css" \
+    "$base_url/base.css" \
+    "$base_url/benchmarks.css" 
+
   # NOTE: Using benchmarks for now.
   cat <<EOF
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>Unit Test Results</title>
-    <script type="text/javascript" src="$base_url/table/table-sort.js"></script>
-    <link rel="stylesheet" type="text/css" href="$base_url/table/table-sort.css" />
-    <link rel="stylesheet" type="text/css" href="$base_url/benchmarks.css" />
-
-  </head>
-  <body>
+  <body class="width40">
     <p id="home-link">
       <a href="/">oilshell.org</a>
     </p>
     <h2>Unit Test Results</h2>
 
 EOF
-  csv2html $in_dir/report.csv
+
+  web/table/csv2html.py $in_dir/report.csv
 
   cat <<EOF
   </body>

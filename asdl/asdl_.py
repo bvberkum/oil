@@ -47,7 +47,7 @@ def is_simple(sum):
 
 class AST(object):
     def Print(self, f, indent):
-        raise NotImplementedError
+        raise NotImplementedError()
 
     def __repr__(self):
         f = cStringIO.StringIO()
@@ -55,14 +55,31 @@ class AST(object):
         return f.getvalue()
 
 
+class Use(AST):
+    def __init__(self, mod_name, type_names):
+        self.mod_name = mod_name
+        self.type_names = type_names
+
+    def Print(self, f, indent):
+        ind = indent * '  '
+        f.write('%sUse %s {\n' % (ind, self.mod_name))
+        f.write('  %s%s\n' % (ind, ', '.join(t for t in self.type_names)))
+        f.write('%s}\n' % ind)
+
+
 class Module(AST):
-    def __init__(self, name, dfns):
+    def __init__(self, name, uses, dfns):
         self.name = name
+        self.uses = uses
         self.dfns = dfns
 
     def Print(self, f, indent):
         ind = indent * '  '
         f.write('%sModule %s {\n' % (ind, self.name))
+
+        for u in self.uses:
+          u.Print(f, indent+1)
+          f.write('\n')
 
         for d in self.dfns:
           d.Print(f, indent+1)
@@ -116,20 +133,24 @@ class _CompoundAST(AST):
     def __init__(self, fields):
         self.fields = fields or []
 
+
+class Constructor(_CompoundAST):
+    def __init__(self, name, shared_type=None, fields=None):
+        _CompoundAST.__init__(self, fields)
+        self.name = name
+        self.shared_type = shared_type  # for DoubleQuoted %double_quoted
+
         # Add fake spids field.
         # TODO: Only do this if 'attributes' are set.
         if self.fields:
-          self.fields.append(Field('int', 'spids', seq=True))
-
-
-class Constructor(_CompoundAST):
-    def __init__(self, name, fields=None):
-        _CompoundAST.__init__(self, fields)
-        self.name = name
+          #self.fields.append(Field('int', 'spids', seq=True))
+          pass
 
     def Print(self, f, indent):
         ind = indent * '  '
         f.write('%sConstructor %s' % (ind, self.name))
+        if self.shared_type:
+          f.write(' %%%s' % self.shared_type)
 
         if self.fields:
           f.write(' {\n')
@@ -151,7 +172,10 @@ class Sum(AST):
         for t in self.types:
           t.Print(f, indent+1)
         if self.attributes:
-          f.write('%s\n' % self.attributes)
+          f.write('\n')
+          f.write('%s  (attributes)\n' % ind)
+          for a in self.attributes:
+            a.Print(f, indent+1)
         f.write('%s}\n' % ind)
 
 
@@ -166,5 +190,8 @@ class Product(_CompoundAST):
         for field in self.fields:
           field.Print(f, indent+1)
         if self.attributes:
-          f.write('%s\n' % self.attributes)
+          f.write('\n')
+          f.write('%s  (attributes)\n' % ind)
+          for a in self.attributes:
+            a.Print(f, indent+1)
         f.write('%s}\n' % ind)

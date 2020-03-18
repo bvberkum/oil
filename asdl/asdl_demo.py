@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """
 asdl_demo.py
 """
@@ -7,14 +7,11 @@ from __future__ import print_function
 import sys
 from asdl import asdl_ as asdl
 from asdl import front_end
-from asdl import arith_parse
+from asdl import typed_arith_parse
 from asdl import py_meta
 from asdl import format as fmt
 
-from core.meta import Id
-from core import util
-
-log = util.log
+from core.util import log
 
 
 def main(argv):
@@ -27,7 +24,7 @@ def main(argv):
     # Called by asdl/run.sh py-cpp
 
     schema_path = argv[2]
-    app_types = {'id': asdl.UserType(Id)}
+    app_types = {'id': asdl.UserType('id_kind_asdl', 'Id_t')}
     with open(schema_path) as f:
       schema_ast, type_lookup = front_end.LoadSchema(f, app_types)
 
@@ -65,9 +62,8 @@ def main(argv):
   elif action == 'arith-format':  # pretty printing
     expr = argv[2]
 
-    obj = arith_parse.ParseShell(expr)
-    #out = fmt.TextOutput(sys.stdout)
-    tree = fmt.MakeTree(obj)
+    obj = typed_arith_parse.ParseShell(expr)
+    tree = obj.PrettyTree()
     #treee= ['hi', 'there', ['a', 'b'], 'c']
     f = fmt.DetectConsoleOutput(sys.stdout)
     fmt.PrintTree(tree, f)

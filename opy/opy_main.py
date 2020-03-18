@@ -1,9 +1,9 @@
-#!/usr/bin/env python
 """
 opy_main.py
 """
 from __future__ import print_function
 
+import cStringIO
 import hashlib
 import optparse
 import os
@@ -14,10 +14,6 @@ import types
 from . import pytree
 from . import skeleton
 
-from .pgen2 import driver, parse, pgen, grammar
-from .pgen2 import token
-from .pgen2 import tokenize
-
 from .compiler2 import consts
 from .compiler2 import dis_tool
 from .compiler2 import misc
@@ -27,12 +23,19 @@ from .compiler2 import transformer
 from .byterun import execfile
 from .byterun import ovm
 
+from pgen2 import driver, parse, pgen, grammar
+from pgen2 import token
+from pgen2 import tokenize
+
 from frontend import args
-from core import util
+from core.util import log
+from core import pyutil
 
-from ovm2 import oheap2
+from typing import TYPE_CHECKING
 
-log = util.log
+if TYPE_CHECKING:
+  from typing import Dict
+  from pgen2.parse import PNode
 
 
 # From lib2to3/pygram.py.  This takes the place of the 'symbol' module.
@@ -63,15 +66,18 @@ def HostStdlibNames():
   return names
 
 
-def WriteGrammar(grammar_path, pickle_path):
-  log("Generating grammar tables from %s", grammar_path)
-  g = pgen.generate_grammar(grammar_path)
-  log("Writing grammar tables to %s", pickle_path)
-  try:
-    # calls pickle.dump on self.__dict__ after making it deterministic
-    g.dump(pickle_path)
-  except OSError as e:
-    log("Writing failed: %s", e)
+def WriteGrammar(grammar_path, marshal_path):
+  """Used for py27.grammar.
+  
+  oil_lang/grammar.pgen2 uses oil_lang/grammar_gen.py
+  """
+  with open(grammar_path) as f:
+    gr = pgen.MakeGrammar(f)
+
+  with open(marshal_path, 'wb') as out_f:
+    gr.dump(out_f)
+
+  log('Compiled %s -> grammar tables in %s', grammar_path, marshal_path)
 
 
 def CountTupleTree(tu):
@@ -92,12 +98,19 @@ def CountTupleTree(tu):
 class TupleTreePrinter(object):
   def __init__(self, names):
     self._names = names
+    # TODO: parameterize by grammar.
+    self.max_token_index = max(token.tok_name)
 
   def Print(self, tu, f=sys.stdout, indent=0):
     ind = '  ' * indent
     f.write(ind)
     if isinstance(tu, tuple):
-      f.write(self._names[tu[0]])
+      num = tu[0]
+      if num < self.max_token_index:
+        f.write(self._names[num])
+        f.write(' %s (%d, %d)\n' % (tu[1], tu[2], tu[3]))
+        return
+      f.write(self._names[num])
       f.write('\n')
       for entry in tu[1:]:
         self.Print(entry, f, indent=indent+1)
@@ -105,10 +118,38 @@ class TupleTreePrinter(object):
       f.write(str(tu))
       f.write('\n')
     elif isinstance(tu, str):
-      f.write(str(tu))
+      f.write(tu)
       f.write('\n')
     else:
       raise AssertionError(tu)
+
+
+class ParseTreePrinter(object):
+  """Prints a tree of PNode instances."""
+  def __init__(self, names):
+    # type: (Dict[int, str]) -> None
+    self.names = names
+    self.f = sys.stdout
+
+  def Print(self, pnode, f=sys.stdout, indent=0, i=0):
+    # type: (PNode, int, int) -> None
+
+    ind = '  ' * indent
+    # NOTE:
+    # - 'tok' used to be opaque context
+    #   - it's None for PRODUCTIONS (nonterminals)
+    #   - for terminals, it's (prefix, (lineno, column)), where lineno is
+    #     1-based, and 'prefix' is a string of whitespace.
+    #     e.g. for 'f(1, 3)', the "3" token has a prefix of ' '.
+    if isinstance(pnode.tok, tuple):
+      # Used for ParseWith
+      v = pnode.tok[0]
+    else:
+      v = '-'
+    self.f.write('%s%d %s %s\n' % (ind, i, self.names[pnode.typ], v))
+    if pnode.children:  # could be None
+      for i, child in enumerate(pnode.children):
+        self.Print(child, indent=indent+1, i=i)
 
 
 class TableOutput(object):
@@ -218,7 +259,7 @@ def Options():
 
 
 # Made by the Makefile.
-PICKLE_REL_PATH = '_build/opy/py27.grammar.pickle'
+GRAMMAR_REL_PATH = '_build/opy/py27.grammar.marshal'
 
 def OpyCommandMain(argv):
   """Dispatch to the right action."""
@@ -235,13 +276,14 @@ def OpyCommandMain(argv):
                    # That will shift the input.
 
   if action in (
-      'parse', 'compile', 'dis', 'ast', 'symbols', 'cfg', 'compile-ovm',
-      'eval', 'repl', 'run', 'run-ovm'):
-    loader = util.GetResourceLoader()
-    f = loader.open(PICKLE_REL_PATH)
-    gr = grammar.Grammar()
-    gr.load(f)
+      'parse', 'parse-with', 'compile', 'dis', 'ast', 'symbols', 'cfg',
+      'compile-ovm', 'eval', 'repl', 'run', 'run-ovm'):
+    loader = pyutil.GetResourceLoader()
+    f = loader.open(GRAMMAR_REL_PATH)
+    contents = f.read()
     f.close()
+    gr = grammar.Grammar()
+    gr.loads(contents)
 
     # In Python 2 code, always use from __future__ import print_function.
     try:
@@ -276,8 +318,8 @@ def OpyCommandMain(argv):
 
   if action == 'pgen2':
     grammar_path = argv[0]
-    pickle_path = argv[1]
-    WriteGrammar(grammar_path, pickle_path)
+    marshal_path = argv[1]
+    WriteGrammar(grammar_path, marshal_path)
 
   elif action == 'stdlib-parse':
     # This is what the compiler/ package was written against.
@@ -314,33 +356,54 @@ def OpyCommandMain(argv):
     py_path = argv[0]
     with open(py_path) as f:
       tokens = tokenize.generate_tokens(f.readline)
-      p = parse.Parser(gr, convert=skeleton.py2st)
-      parse_tree = driver.PushTokens(p, tokens, gr.symbol2number['file_input'])
+      p = parse.Parser(gr)
+      pnode  = driver.PushTokens(p, tokens, gr, 'file_input')
 
-    if isinstance(parse_tree, tuple):
-      n = CountTupleTree(parse_tree)
-      log('COUNT %d', n)
+    printer = ParseTreePrinter(transformer._names)  # print raw nodes
+    printer.Print(pnode)
 
-      printer = TupleTreePrinter(transformer._names)
-      printer.Print(parse_tree)
-    else:
-      tree.PrettyPrint(sys.stdout)
-      log('\tChildren: %d' % len(tree.children), file=sys.stderr)
+  # Parse with an arbitrary grammar, but the Python lexer.
+  elif action == 'parse-with':
+    grammar_path = argv[0]
+    start_symbol = argv[1]
+    code_str = argv[2]
+
+    with open(grammar_path) as f:
+      gr = pgen.MakeGrammar(f)
+
+    f = cStringIO.StringIO(code_str)
+    tokens = tokenize.generate_tokens(f.readline)
+    p = parse.Parser(gr)  # no convert=
+    try:
+      pnode = driver.PushTokens(p, tokens, gr, start_symbol)
+    except parse.ParseError as e:
+      # Extract location information and show it.
+      _, _, (lineno, offset) = e.opaque
+      # extra line needed for '\n' ?
+      lines = code_str.splitlines() + ['']
+
+      line = lines[lineno-1]
+      log('  %s', line)
+      log('  %s^', ' '*offset)
+      log('Parse Error: %s', e)
+      return 1
+    printer = ParseTreePrinter(transformer._names)  # print raw nodes
+    printer.Print(pnode)
 
   elif action == 'ast':  # output AST
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
     py_path = argv[i]
     with open(py_path) as f:
       graph = compiler.Compile(f, opt, 'exec', print_action='ast')
 
   elif action == 'symbols':  # output symbols
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
     py_path = argv[i]
     with open(py_path) as f:
       graph = compiler.Compile(f, opt, 'exec', print_action='symbols')
 
   elif action == 'cfg':  # output Control Flow Graph
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
     py_path = argv[i]
     with open(py_path) as f:
       graph = compiler.Compile(f, opt, 'exec', print_action='cfg')
@@ -349,7 +412,7 @@ def OpyCommandMain(argv):
     # spec.Arg('action', ['foo', 'bar'])
     # But that leads to some duplication.
 
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
 
     py_path = argv[i]
     out_path = argv[i+1]
@@ -366,7 +429,9 @@ def OpyCommandMain(argv):
       marshal.dump(co, out_f)
 
   elif action == 'compile-ovm':
-    opt, i = compile_spec.Parse(argv)
+    # NOTE: obsolete
+    from ovm2 import oheap2
+    opt, i = compile_spec.ParseArgv(argv)
     py_path = argv[i]
     out_path = argv[i+1]
 
@@ -392,7 +457,7 @@ def OpyCommandMain(argv):
     log('Wrote only the bytecode to %r', out_path)
 
   elif action == 'eval':  # Like compile, but parses to a code object and prints it
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
     py_expr = argv[i]
     f = skeleton.StringInput(py_expr, '<eval input>')
     co = compiler.Compile(f, opt, 'eval')
@@ -429,7 +494,7 @@ def OpyCommandMain(argv):
     out.Close()
 
   elif action == 'dis':
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
     path = argv[i]
     v = dis_tool.Visitor()
 
@@ -469,7 +534,7 @@ def OpyCommandMain(argv):
     #logging.basicConfig(level=level)
     #logging.basicConfig(level=logging.DEBUG)
 
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
 
     py_path = argv[i]
     opy_argv = argv[i:]
@@ -489,7 +554,7 @@ def OpyCommandMain(argv):
       raise args.UsageError('Invalid path %r' % py_path)
 
   elif action == 'run-ovm':  # Compile and run, without writing pyc file
-    opt, i = compile_spec.Parse(argv)
+    opt, i = compile_spec.ParseArgv(argv)
     py_path = argv[i]
     opy_argv = argv[i+1:]
 

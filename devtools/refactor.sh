@@ -32,21 +32,45 @@ k2() {
 # Execute a bunch of find/replace pairs in a text file.
 replace() {
   local file=$1
+  local include_asdl=${2:-}
 
   # NOTE: Escaping here is messed up.  sed doesn't have --name like awk?
   # To match literal parentheses I had to double-escape like this
   # (shell-escape, then sed-escape).
   # MakeMatcher\\(\\) MATCHER
+
+  local -a files=( */*.py )
+  if test -n "$include_asdl"; then
+    files+=( */*.asdl )
+  fi
+
   while read pat replace; do
-    sed -r -i "s/${pat}/${replace}/g" */*.py
+    sed -r -i "s/${pat}/${replace}/g" "${files[@]}"
+
+    # word-anchored version
+    #sed -r -i "s/\b${pat}\b/${replace}/g" "${files[@]}"
   done < $file
 }
 
 replace2() {
   #sed -r -i "s/^from osh import parse_lib/from frontend import parse_lib/g" */*.py
   #sed -r -i "s/^from core import libstr/from osh import string_ops/g" */*.py
-  sed -r -i "s/test_builtin/builtin_bracket/g" */*.py
-  sed -r -i "s/comp_builtins/builtin_comp/g" */*.py
+  #sed -r -i "s/^from osh import word$/from osh import word_/g" */*.py
+  #sed -r -i 's/from _devbuild.gen.syntax_asdl import word as osh_word/from _devbuild.gen.syntax_asdl import word/g' */*.py
+  #sed -r -i 's/osh_word/word/g' */*.py
+
+  if test -n ''; then
+    sed -r -i 's/bool_expr.BoolUnary/bool_expr.Unary/g' */*.py
+    sed -r -i 's/bool_expr.BoolBinary/bool_expr.Binary/g' */*.py
+    sed -r -i 's/bool_expr_e.BoolUnary/bool_expr_e.Unary/g' */*.py
+    sed -r -i 's/bool_expr_e.BoolBinary/bool_expr_e.Binary/g' */*.py
+    sed -r -i 's/bool_expr__BoolUnary/bool_expr__Unary/g' */*.py
+    sed -r -i 's/bool_expr__BoolBinary/bool_expr__Binary/g' */*.py
+  fi
+
+  sed -r -i 's/command.SimpleCommand/command.Simple/g' */*.py
+  sed -r -i 's/command_e.SimpleCommand/command_e.Simple/g' */*.py
+  sed -r -i 's/command__SimpleCommand/command__Simple/g' */*.py
 }
 
 trailing-ws() {
@@ -71,6 +95,44 @@ find-old-asdl() {
 
   # Only tests left
   egrep 'import.*\bast\b' */*.py || true
+}
+
+# This should be cleaned up
+grep-span-funcs() {
+  grep MostSpan {osh,core,frontend}/*.py
+}
+
+cmd-val() {
+  local file=$1
+  sed -i 's/arg_vec.strs/cmd_val.argv/g' $file
+  sed -i 's/arg_vec.spids/cmd_val.arg_spids/g' $file
+  sed -i 's/arg_vector/cmd_value__Argv/g' $file
+  sed -i 's/arg_vec/cmd_val/g' $file
+}
+
+opts-accessor() {
+  sed --regexp-extended -i 's/exec_opts[.][a-z_]+/\0\(\)/g' */*.py
+  sed --regexp-extended -i 's/parse_opts[.][a-z_]+/\0\(\)/g' */*.py
+}
+
+lexer-def() {
+  sed --regexp-extended -i 's/import lex$/import lexer_def/' */*.py
+  #sed --regexp-extended -i 's/\blex[.]/lexer_def./g' */*.py
+}
+
+id-kind() {
+  sed --regexp-extended -i 's/import id_kind$/import id_kind_def/' */*.py
+  sed --regexp-extended -i 's/id_kind[.]/id_kind_def./g' */*.py
+}
+
+state() {
+  sed --regexp-extended -i 's/from osh import state/from core import state/' */*.py
+  sed --regexp-extended -i 's/from osh.state/from core.state/' */*.py
+}
+
+builtin() {
+  sed --regexp-extended -i 's/from osh import builtin$/from osh import builtin_misc/' */*.py
+  #sed --regexp-extended -i 's/builtin[.]/builtin_misc./' */*.py
 }
 
 "$@"

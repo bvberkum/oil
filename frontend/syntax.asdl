@@ -1,4 +1,4 @@
--- Data types for the osh AST, aka "Lossless Syntax Tree".
+-- Data types for the Oil AST, aka "Lossless Syntax Tree".
 --
 -- Invariant: the source text can be reconstructed byte-for-byte from this
 -- tree.
@@ -16,95 +16,194 @@
 -- * let arithmetic (rarely used)
 -- * coprocesses -- one with arg and one without
 -- * select block
--- * 1>&2- to close redirect
 -- * case fallthrough ;& and ;;&
+-- * 1>&2- to close redirect
+-- * named descriptors (bash): cmd {fd1}>left.txt {fd2}>right.txt
 
--- Represented but Not Parsed:
--- * ArrayPair -- ([foo]=bar)
-
--- Parsed but Not Implemented
--- * extended glob
+-- Parsed but Not Implemented:
 -- * <> redirect
 
 -- TODO: Preserve these source differences:
 -- * order of redirects: 'echo >out.txt hi'  vs echo hi >out.txt
---   * In the printer, I want to preserve line breaks!  foo \bar?
--- TODO:
--- * remove redundancy of 'string val' in token.  It should use the span.
--- * Get rid of line_id.  'string line' is more straightforward.  And maybe
---   span_id?
--- * rename this file to osh/syntax.asdl, and then we have oil/syntax.asdl.
---   Nothing is shared?
+
+-- Refactorings:
+--
+--   cmd_token = Word %compound_word | Token %Token
+--   arith_expr = Word %compound_word | VarRef %Token
+--   bool_expr = WordTest %compound_word | ...
+--
+-- Many %Token references:
+--   word_part = Literal %Token | ...
+--   type_expr = Atom %Token | ...
+--   printf_part ...
+--
+-- Size optimization:
+--   'Token left' should really be 'speck left'.  Saves a lot of space.
+--   SimpleVarSub(Token token) could be optimized
+--   SimpleVarSub(id id, string val, int span_id) without useless token 'tag'
+--   Or VarSubSpecial(id id, int span_id)
+--    | VarSubNum(id, int n, int span_id)
+--    | SimpleVarSub(id, string val, int span_id)
+-- and get rid of attributes (int* spids)
 
 module syntax
 {
-  -- A portion of a line, used for error messages.  For translation to work,
-  -- the spans should "sum up" to the original file. 
-  line_span = (int line_id, int col, int length)
-  -- Redundant val, as noted above
-  token = (id id, string val, int span_id)
+  -- core/main_loop.py
+  parse_result = EmptyLine | Eof | Node(command cmd)
+ 
+  -- 'source' represents the location of a line / token.
+  source = 
+    Interactive
+  | Unused(string comment)     -- completion and history never show parse errors?
+  | CFlag
+  | Stdin(string comment)
+    -- TODO: if it's not the main script, it's sourced, and you could provide
+    -- a chain of locations back to the sourced script!
+    -- MainFile(string path) or SourcedFile(string path, int spid)
+  | MainFile(string path)
+  | SourcedFile(string path, int spid)
+  | ArgvWord(int word_spid)    -- code parsed from a single word.
+                               -- e.g. trap, complete -W, printf
+  | ArgvCommand(int first_spid) -- first word
+  | EvalArg(int eval_spid)     -- special case for 'eval'
+                               -- The rest of the args are JOINED, so it's not
+                               -- clear where they come from.
+  | Trap(int word_spid)        -- code for the trap builtin
+  | PromptCommand(int spid)    -- code for the PROMPT_COMMAND plugin
+  | Variable(int spid)         -- $PS1, $PS4, etc.
+                               --   where the variable was last assigned
+    -- 3 instances of reparsing:
 
-  -- Optional step for {100..50..-15}
-  braced_step = (int val, int negated)
+    -- alias expansion (location of first word)
+  | Alias(string argv0, int argv0_spid)
+
+    -- reparsing in  echo `echo \"hi\"`
+  | Backticks(int left_spid, int right_spid)
+
+    -- reparsing of x+1 in a[x+1]=y
+  | LValue(int left_spid, int right_spid)
+
+  -- Logically, here's our record for a physical line.  For compactness, we
+  -- TRANSPOSE it into 3 parallel arrays, so this record is UNUSED.
+  -- line_record = (int line_num, string val, source src)
+
+  -- A line_span represents the source location of a token, which never crosses
+  -- lines.  Encoded into LST with 'int spid'.
+  line_span = (int line_id, int col, int length)
+
+  -- NOTE: 'val' and 'span_id' fields redundant but useful.  'val' is for
+  -- execution, and 'span_id' is for error messages and translation.
+  -- TODO: define Id_t as uint16_t, and this should pack in (2+2) + 4 + 8 = 16
+  -- bytes.
+  Token = (id id, int span_id, string val)
+
+  -- After parsing, we often don't need the token 'string val', so use a
+  -- 'speck'.  Notes:
+  -- * This structure could be packed into (2 + 2 + 4) = 8 bytes.
+  -- * If we had a step between parsing and execution (i.e. compilation), we could
+  --   just use specks as tokens.  We care about 'string val' when they're made
+  --   literal parts of words; variable, function, and parameter names; etc.
+  speck = (id id, int span_id)
+
+  -- Note: like token -> speck, token -> strand is for when we don't need the id.
+  -- We're not using it since it's probably 4 + 4 + 8 = 16 bytes, which doesn't
+  -- save any space over the token!
+  -- strand = (int span_id, string val)
+
+  --
+  -- Shell language
+  --
 
   bracket_op = 
     WholeArray(id op_id)  -- * or @
   | ArrayIndex(arith_expr expr)
 
   suffix_op = 
-    StringNullary(id op_id)  -- ${x@Q}
-  | StringUnary(id op_id, word arg_word)  -- e.g. ${v:-default}
+    Nullary(id op_id)  -- ${x@Q} or ${!prefix@} (which also has prefix_op)
+  | Unary(id op_id, word arg_word)  -- e.g. ${v:-default}
     -- TODO: token for / to attribute errors
   | PatSub(word pat, word? replace, id replace_mode)
-  -- begin is optional with ${array::1}
+    -- begin is optional with ${array::1}
   | Slice(arith_expr? begin, arith_expr? length)
+  attributes (int* spids)
 
-  -- TODO: Constructors should be scoped?  array_item::Pair?
-  array_item = 
-    ArrayWord(word w)
-  | ArrayPair(word key, word value)
+  double_quoted = (Token left, word_part* parts) attributes (int* spids)
+  single_quoted = (Token left, Token* tokens) attributes (int* spids)
+
+  -- Note: simple_var_sub could be split up into speck for $?, (speck, int) for
+  -- $0 $1, token for $foo.
+  simple_var_sub = (Token token)
+
+  -- TODO: Add    ${x %.3f}   ${x|html}
+  braced_var_sub = (
+      Token token,  -- the name
+      speck? prefix_op,  -- prefix # or ! operators
+      bracket_op? bracket_op,
+      suffix_op? suffix_op
+  ) attributes (int* spids)
+
+  command_sub = (
+      Token left_token, command command_list
+  ) attributes (int* spids)
+
+  -- Note: can be word.BracedTree
+  sh_array_literal = (Token left, word* words) attributes (int* spids)
+
+  -- Used in both expr and a word_part
+  arg_list = (expr* positional, named_arg* named)
 
   word_part = 
-    -- TODO: should be array_item* items.  They CAN be mixed, like a=([x]=y z)
-    ArrayLiteralPart(word* words)
-  | LiteralPart(token token)
-  | EscapedLiteralPart(token token)
-    -- for 'foo=' and "${a:-}"
-  | SingleQuotedPart(token left, token* tokens)
-  | DoubleQuotedPart(word_part* parts)
-  | SimpleVarSub(token token)
-  | BracedVarSub(token token,
-                id? prefix_op,  -- prefix # or ! operators
-                bracket_op? bracket_op
-                suffix_op? suffix_op)
+    ShArrayLiteral %sh_array_literal
+    -- alternating key and value (saving some space)
+    -- Note that word.Empty isn't needed here
+  | AssocArrayLiteral(Token left, compound_word* pairs)
+  | Literal %Token
+    -- escaped case is separate so the evaluator doesn't have to check token ID
+  | EscapedLiteral(Token token)
+  | SingleQuoted %single_quoted
+  | DoubleQuoted %double_quoted
+  | SimpleVarSub %simple_var_sub
+  | BracedVarSub %braced_var_sub
+  | CommandSub %command_sub
     -- This should be token tilde, token rest
-  | TildeSubPart(token token)
+  | TildeSub(Token token)
     -- For command sub and process sub: $(...)  <(...)  >(...)
-  | CommandSubPart(command command_list, token left_token)
-  | ArithSubPart(arith_expr anode)
+  | ArithSub(arith_expr anode)
     -- {a,b,c}
-  | BracedAltPart(word* words)
-    -- {1..10} or {1..10..2}
-  | BracedIntRangePart(int start, int end, braced_step? step)
+  | BracedTuple(compound_word* words)
+    -- {1..10} or {-5..10..2} or {01..10} (leading zeros matter)
     -- {a..f} or {a..f..2} or {a..f..-2}
-  | BracedCharRangePart(string start, string end, braced_step? step)
+  | BracedRange(id kind, string start, string end, int step)
+    -- note: optional int may need special handling in ASDL
   -- extended globs are parsed statically, unlike globs
-  | ExtGlobPart(token op, word* arms)
+  | ExtGlob(Token op, word* arms)
+    -- @array
+  | Splice(Token name)
+    -- $strfunc(x) and @arrayfunc(x)
+  | FuncCall(Token name, arg_list args)
+    -- $[d->key], etc.
+  | ExprSub(Token left, expr child)
+  attributes (int* spids)
+
+  compound_word = (word_part* parts)
 
   word = 
-    -- for RHS of 'x=' and the argument in ${x:-}
-    EmptyWord
-  | TokenWord(token token)
-    -- A CompoundWord can contain any word_part except the Braced*Part.
+    -- Empty is for the RHS of 'x=', 'declare x=', and the argument in "${x:-}".
+    -- Semantically, we need it for "${x:-}" (see osh/word_parse.py).  Other 
+    -- usages may be cosmetic, because e.g. compound_word will have zero parts
+    -- in the assoc array literal A=([k]=)
+    Empty
+  | Token %Token
+    -- A Compound word can contain any word_part except the Braced*Part.
     -- We could model this with another variant type but it incurs runtime
-    -- overhead and seems like overkill.  Note that DoubleQuotedPart can't
-    -- contain a SingleQuotedPart, etc. either.
-  | CompoundWord(word_part* parts)
-    -- A BracedWordTree is a word because it can appear in a command.  It can
+    -- overhead and seems like overkill.  Note that DoubleQuoted can't
+    -- contain a SingleQuoted, etc. either.
+  | Compound %compound_word
+    -- A BracedTree is a word because it can appear in a command.  It can
     -- contains any type of word_part.
-  | BracedWordTree(word_part* parts)
+  | BracedTree(word_part* parts)
     -- For dynamic parsing of test/[ -- the string is already evaluated.
-  | StringWord(id id, string s)
+  | String(id id, string s, int span_id)
 
   -- TODO: Need more tokens/spids to translate a[x++]=1
   -- These don't follow the LST design, because they're shared for
@@ -112,72 +211,77 @@ module syntax
   -- It would be better runtime.lvalue were be the shared representation, and
   -- there were 2 different lhs_expr types.  They both should contribute their
   -- location information.
-  lhs_expr =
-    LhsName(string name)
-  | LhsIndexedName(string name, arith_expr index)
+  sh_lhs_expr =
+    Name(string name)
+  | IndexedName(string name, arith_expr index)
+  | UnparsedIndex(string name, string index)  -- for translation
+  attributes (int* spids)
 
   arith_expr =
-    ArithVarRef(token token)  -- variable without $
+    VarRef(Token token)  -- variable without $
   | ArithWord(word w)  -- a string that looks like an integer
 
-  | UnaryAssign(id op_id, lhs_expr child)
-  | BinaryAssign(id op_id, lhs_expr left, arith_expr right)
-  | ArithUnary(id op_id, arith_expr child)
-  -- TODO: add token for divide by zero
-  | ArithBinary(id op_id, arith_expr left, arith_expr right)
+    -- TODO: instead of sh_lhs_expr, could be arith_expr with
+    -- VarRef|ArithWord|Binary for a[]
+  | UnaryAssign(id op_id, sh_lhs_expr child)
+  | BinaryAssign(id op_id, sh_lhs_expr left, arith_expr right)
+  | Unary(id op_id, arith_expr child)
+    -- TODO: add token/speck for divide by zero
+  | Binary(id op_id, arith_expr left, arith_expr right)
   | TernaryOp(arith_expr cond, arith_expr true_expr, arith_expr false_expr)
-  | FuncCall(arith_expr func, arith_expr* args)
 
   bool_expr =
     WordTest(word w)  -- e.g. [[ myword ]]
-  | BoolBinary(id op_id, word left, word right)
-  | BoolUnary(id op_id, word child)
+  | Binary(id op_id, word left, word right)
+  | Unary(id op_id, word child)
   | LogicalNot(bool_expr child)
   | LogicalAnd(bool_expr left, bool_expr right)
   | LogicalOr(bool_expr left, bool_expr right)
 
   redir = 
-    Redir(token op, int fd, word arg_word)
-  | HereDoc(token op, int fd,
+    Redir(Token op, int fd, word arg_word)
+  | HereDoc(Token op, int fd,
             word here_begin,  -- e.g. EOF or 'EOF'
             int here_end_span_id,  -- this span is an entire line
             word_part* stdin_parts -- one for each line
            )
 
   assign_op = Equal | PlusEqual
-  assign_pair = (lhs_expr lhs, assign_op op, word? rhs)
-  env_pair = (string name, word val)
+  assign_pair = (sh_lhs_expr lhs, assign_op op, word? rhs, int* spids)
+  env_pair = (string name, word val, int* spids)
 
   -- Each arm tests one word against multiple words
-  case_arm = (word* pat_list, command* action)
-  if_arm = (command* cond, command* action)
-
-  iterable = 
-    IterArgv
-  | IterArray(word* words)
+  case_arm = (word* pat_list, command* action, int* spids)
+  if_arm = (command* cond, command* action, int* spids)
 
   -- TODO: Make field names consistent: child vs expr, etc.
 
   command = 
     NoOp
-    -- TODO: respect order of words and redirects
-  | SimpleCommand(word* words, redir* redirects, env_pair* more_env)
-  | Sentence(command child, token terminator)
-  | Assignment(id keyword, string* flags, assign_pair* pairs)
-  | ControlFlow(token token, word? arg_word)
+    -- NOTE: block is always a BraceGroup.
+  | Simple(word* words, redir* redirects, env_pair* more_env, command? block)
+    -- This doesn't technically belong in the LST, but it's convenient for
+    -- execution
+  | ExpandedAlias(command child, redir* redirects, env_pair* more_env)
+  | Sentence(command child, Token terminator)
+    -- NOTE: Only represents "bare assignment".
+  | ShAssignment(assign_pair* pairs, redir* redirects)
+  | ControlFlow(Token token, word? arg_word)
+    -- Note: There are spids for every pipeline operator, parallel to
+    -- stderr_indices
   | Pipeline(command* children, bool negated, int* stderr_indices)
   | AndOr(id* ops, command* children)
-    -- Part of for/while/until.  Can have one or more children.
+    -- Part of for, while, until (but not if, case, ShFunction)
   | DoGroup(command* children, redir* redirects)
-    -- A brace group is a compound command, with redirects.  Can have one or
-    -- more children.
+    -- A brace group is a compound command, with redirects.
+    -- TODO: Combine DoGroup and BraceGroup, with 'Token left' for do or {
   | BraceGroup(command* children, redir* redirects)
-    -- Can have one or more children.
-  | Subshell(command child, redir* redirects)
+    -- Contains a single child, like CommandSub
+  | Subshell(command command_list, redir* redirects)
   | DParen(arith_expr child, redir* redirects)
   | DBracket(bool_expr expr, redir* redirects)
     -- do_arg_iter: whether to implicitly loop over "$@"
-    -- TODO: Make iter_words a sum type.  iterable for_words
+    -- NOTE: iterable could be a sum type instead of do_arg_iter.
   | ForEach(string iter_name, word* iter_words, bool do_arg_iter,
             command body, redir* redirects)
     -- C-style for loop.  Any of the 3 expressions can be omitted.
@@ -185,76 +289,257 @@ module syntax
     -- order.
   | ForExpr(arith_expr? init, arith_expr? cond, arith_expr? update,
             command? body, redir* redirects)
-  | WhileUntil(token keyword, command* cond, command body, redir* redirects)
+  | WhileUntil(Token keyword, command* cond, command body, redir* redirects)
   | If(if_arm* arms, command* else_action, redir* redirects)
   | Case(word to_match, case_arm* arms, redir* redirects)
-  | FuncDef(string name, command body, redir* redirects)
+  | ShFunction(string name, command body)
   | TimeBlock(command pipeline)
     -- Most nodes optimize it out as command*, but there are a few places where
     -- this is useful for type safety.
   | CommandList(command* children)
 
-  -- For now, using stderr_indices representation because it's more compact.
-  -- |& in osh; |- in oil.
-  -- pipe_op = Pipe | PipeAndStderr
+    -- Oil stuff
 
+    -- For 'x = myexpr'.  There's no type and no comma allowed.
+  | BareDecl(Token lhs, expr rhs)
+    -- var, const
+  | VarDecl(Token? keyword, name_type* lhs, expr rhs)
+    -- setvar/set, auto.  Note: op can be a speck
+  | PlaceMutation(Token? keyword, place_expr* lhs, Token op, expr rhs)
+    -- do, pp, pass.  An expression for its side effects
+  | Expr(speck keyword, expr e)
+    -- return an Obj, not an int-like string
+  | Return(Token keyword, expr e)
+  | OilCondition(expr e) -- for if/while
+  | OilForIn(name_type* lhs, expr iterable, command body)
+  | Proc(Token name, proc_sig sig, command body)
+  | Func(Token name, 
+         param* pos_params, Token? pos_splat,
+         param* named_params, Token? named_splat,
+         type_expr* return_types, command body)
+
+  attributes (int* spids)
+
+  -- 'open' is for proc p { }; closed is for proc p [] { }
+  proc_sig =
+    Open
+  | Closed(param* params, Token? rest, Token? block)
+
+  param = (Token name, type_expr? type, expr? default_val)
+
+  --
   -- Glob representation, for converting ${x//} to extended regexes.
+  --
 
   -- Example: *.[ch] is:
   --   GlobOp(<Glob_Star '*'>),
   --   GlobLit(Glob_OtherLiteral, '.'),
-  --   CharClassExpr(False, 'ch')  # from Glob_CleanLiterals token
+  --   CharClass(False, ['ch'])  # from Glob_CleanLiterals token
 
   glob_part =
-    GlobLit(id id, string s)
-  | GlobOp(id op_id)  -- * or ?
+    Literal(id id, string s)
+  | Operator(id op_id)  -- * or ?
   | CharClass(bool negated, string* strs)
 
   -- Char classes are opaque for now.  If we ever need them:
   -- * Collating symbols are [. .]
   -- * Equivalence classes are [=
 
+  printf_part =
+    Literal(Token token)
+    -- flags are 0 hyphen space + #
+    -- type is 's' for %s, etc.
+  | Percent(Token? flag, Token? width, Token? precision, Token type)
 
   --
   -- OIL LANGUAGE
   --
+  -- Copied and modified from Python-3.7/Parser/Python.asdl !
 
-  -- NOTE: These are defined in the same ASDL module since the OSH LST will
-  -- contain oil_command in the form of 'proc and 'func'.  The Oil LST will NOT
-  -- contain any OSH nodes.  It will have 'sh-eval', shEval(), etc. which work
-  -- with strings.
+  expr_context = Load | Store | Del | AugLoad | AugStore | Param
 
-  oil_expr =
-    Name
-  | UnaryOp(token op, oil_expr child)
-  | BinaryOp(token op, oil_expr left, oil_expr right)
-  | FuncCall(oil_expr func, oil_expr* args)
+  -- type expressions:   Int   Array[Int]   Dict[Str, Any]
+  type_expr =
+    Simple(Token name)
+  | Compound(Token name, type_expr* params)
 
-  oil_word_part = 
-    Literal(token token)
-  | EscapedLiteral(token token)
-    -- for 'foo=' and "${a:-}"
-  | SingleQuoted(token left, token* tokens)
-  | DoubleQuoted(token left, oil_word_part* parts)
-  | TildeSub(token token)
-  | VarSub(token token)
-  | ExprSub(token token,
-            id? prefix_op,  -- prefix # or ! operators
-            bracket_op? bracket_op
-            suffix_op? suffix_op)
-  | CommandSub(oil_cmd command_list, token left_token)
+  -- LHS binding in loops, list comprehensions, and var/const
+  name_type = (Token name, type_expr? typ)
 
-  -- NOTE differences from OSH: no TokenWord, but add GlobWord, etc.
-  oil_word = 
-    Compound(oil_word_part* parts)
-  | Glob()
-  | Braced(oil_word_part* parts) -- TODO: Does it need its own parts?
+  -- TODO: Inline this into GenExp and ListComp?  Just use a flag there?
+  comprehension = (name_type* lhs, expr iter, expr? cond)
 
-  oil_cmd = 
-    -- TODO: respect order of words and redirects
-    Simple(oil_word* words, redir* redirects, env_pair* more_env)
-  | Sentence(oil_cmd child, token terminator)
-  | Pipeline(oil_cmd* children, bool negated)
-  | AndOr(id* ops, oil_cmd* children)
-  | CommandList(oil_cmd* children)
+  -- named arguments supplied to call.  token is null for f(; ...named).
+  named_arg = (Token? name, expr value)
+
+  -- Subscripts are lists of expressions
+  --   a[:i, n]      (we don't have matrices, but we have data frames)
+  subscript = (expr obj, expr* indices)
+
+  -- Attributes are obj.attr, d->key, name::scope,
+  -- TODO: op should be 'speck'
+  attribute = (expr obj, Token op, Token attr, expr_context ctx)
+
+  -- Places that can be mutated.
+  -- TODO: Changed to Var %Token and expr.Var %Token.
+  place_expr = 
+    Var(Token name)
+  | Subscript %subscript
+  | Attribute %attribute
+
+  expr =
+    Var(Token name)  -- a variable name to evaluate
+    -- For null, Bool, Int, Float
+    -- Python uses Num(object n), which doesn't respect our "LST" invariant.
+    -- speck?
+  | Const(Token c)
+    -- @(one 'two' "$three")
+  | ShArrayLiteral %sh_array_literal
+    -- @[a b c] @[1 2 3] @[(1+1) (2+2)]
+  | ArrayLiteral(Token left, expr* items)
+  | RegexLiteral(Token left, re regex, Token* flags, Token? trans_pref)
+
+  | SimpleVarSub %simple_var_sub
+  | BracedVarSub %braced_var_sub
+  | CommandSub %command_sub
+  | SingleQuoted %single_quoted
+  | DoubleQuoted %double_quoted
+
+  | Lambda(name_type* params, expr body)
+
+    -- TODO: speck op
+  | Unary(Token op, expr child)
+  | Binary(Token op, expr left, expr right)
+    -- x < 4 < 3 and (x < 4) < 3
+  | Compare(expr left, speck* ops, expr* comparators)
+  | FuncCall(expr func, arg_list args)
+
+    -- TODO: Need a representation for method call.  We don't just want
+    -- Attribute() and then Call()
+
+  | IfExp(expr test, expr body, expr orelse)
+  | Tuple(expr* elts, expr_context ctx)
+
+  | List(expr* elts, expr_context ctx)
+  | Dict(expr* keys, expr* values)
+    -- For the values in {n1, n2}
+  | Implicit
+
+  | ListComp(expr elt, comprehension* generators)
+    -- not implemented
+  | DictComp(expr key, expr value, comprehension* generators)
+  | GeneratorExp(expr elt, comprehension* generators)
+
+    -- Ranges are written 1:2, with first class expression syntax. There is no
+    -- step as in Python. Use range(0, 10, step=2) for that.
+  | Range(expr lower, expr upper)
+
+    -- Slices occur within [] only.  Unlike ranges, the start/end can be --
+    -- implicit.  Like ranges, denote a step with slice(0, 10, step=2).
+    --   a[3:]   a[:i]
+  | Slice(expr? lower, expr? upper)
+
+  | Subscript %subscript
+  | Attribute %attribute
+
+    -- Ellipsis is like 'Starred' within Python, which are valid on the LHS in
+    -- Python for unpacking, and -- within list literals for splicing.
+    -- (Starred is NOT used for {k:v, **a}.  That used a blank "keys"
+    -- attribute.)
+
+    -- In Oil, "spreading" will be @[1 ...array2] [b, ...list2] and
+    -- {k: v, ...dict2}.  We don't need two different symbols.
+  | Spread(expr child, expr_context ctx)
+  attributes (int* spids)
+
+  --
+  -- Regex Language (Eggex)
+  --
+
+  -- e.g. alnum digit
+  posix_class = (speck? negated, string name)
+  -- e.g. d w s
+  perl_class = (speck? negated, string name)
+
+  -- Note: .NET has && in character classes, making it a recursive language
+
+  class_literal_term = 
+    PosixClass %posix_class
+  | PerlClass %perl_class
+    -- [a-z]   ~[a-z]   TODO: Doesn't respect LST invariant
+  | Range(string start, string end)
+
+  | CharLiteral(Token tok)
+
+  | SimpleVarSub %simple_var_sub
+  | BracedVarSub %braced_var_sub
+  | SingleQuoted %single_quoted
+  | DoubleQuoted %double_quoted
+
+    -- Each of ['abc' \\ \" \xff ] is evaluated to this
+    -- If there is more than one byte and any of them is > 128, there is
+    -- ambiguity about whether it's a single encoded character or multiple
+    -- bytes.
+  | ByteSet(string bytes, int spid)
+    -- [ \u0100 \u00ff ] is evaluated to this
+  | CodePoint(int i, int spid)
+
+  -- NOTE: modifier is unused now, can represent L or P
+  re_repeat =
+    -- TODO: could use speck.  And add back Op(Token op, id modifier)
+    Op(Token op)
+  | Num(Token times)
+  | Range(Token? lower, Token? upper)
+  -- Haven't implemented the modifier, e.g. x{+ P}
+  -- | Num(Token times, id modifier)
+  -- | Range(Token? lower, Token? upper, id modifier)
+
+  re = 
+    -- . ^ $
+    Speck %speck
+    -- %begin or \u123
+  | Token %Token
+  | PosixClass %posix_class
+  | PerlClass %perl_class
+  | ClassLiteral(bool negated, class_literal_term* terms)
+
+    -- @D
+  | Splice(Token name)
+
+    -- $literal ${literal} 'no-backslashes' "other$foo"
+  | SimpleVarSub %simple_var_sub
+  | BracedVarSub %braced_var_sub
+  | SingleQuoted %single_quoted
+  | DoubleQuoted %double_quoted
+
+    -- Compound:
+  | Repeat(re child, re_repeat op)
+  | Seq(re* children)
+  | Alt(re* children)
+
+  | Group(re child)
+    -- TODO: <d+ : month Int> needs Token? type field
+  | Capture(re child, Token? var_name)  
+  | Backtracking(bool negated, Token name, re child)
+
+  -- Regex Evaluation Shares the Same Structure, but uses slightly different
+  -- nodes.
+  -- * Speck/Token (syntactic concepts) -> Primitive (logical)
+  -- * Splice -> re_t
+  -- * All Strings -> Literal
+
+  | Primitive(id id)  -- . dot etc.
+    -- String substitutions are evaluated into literals
+  | LiteralChars(string s, int spid)
 }
+
+-- Ideas for even more precise error messages
+
+-- A temporary value that's NOT stored in the LST.  It's the beginning or end
+-- of a line_span / extent.
+-- position = (int line_id, int col)
+
+-- An extent represents the source locations of a word or word_part, which
+-- may span multiple lines.  Encoded into LST with 'int exid'.
+-- extent = (int s_line_id, int s_col,
+             int e_line_id, int e_col)

@@ -11,9 +11,13 @@ Arena, and the entire Arena can be discarded at once.
 Also, we don't want to save comment lines.
 """
 
-from asdl import const
+from _devbuild.gen.syntax_asdl import (
+    line_span, source_t, source_e, source__MainFile, source__SourcedFile
+)
+from asdl import runtime
+from core.util import log
 
-from core import util
+from typing import List, Dict, cast
 
 
 class Arena(object):
@@ -23,143 +27,113 @@ class Arena(object):
   1. Error reporting
   2. osh-to-oil Translation
   """
-  def __init__(self, arena_id):
-    self.arena_id = arena_id  # an integer stored in tokens
+  def __init__(self):
+    # type: () -> None
 
-    # TODO: lines should be part of the token, so they get garbage collected
-    # when the token goes away.  (For example, a line that's all whitespace
-    # will have no tokens put in the LST.)
-    self.lines = []
-    self.next_line_id = 0
+    # Three parallel arrays indexed by line_id.
+    self.line_vals = []  # type: List[str]
+    self.line_nums = []  # type: List[int]
+    self.line_srcs = []  # type: List[source_t]
+    self.line_num_strs = {}  # type: Dict[int, str]  # an INTERN table
 
-    # first real span is 1.  0 means undefined.
-    self.spans = []
-    self.next_span_id = 0
+    # indexed by span_id
+    self.spans = []  # type: List[line_span]
 
-    # List of (src_path index, physical line number).  This is two integers for
-    # every line read.  We could use a clever encoding of this.  (Although the
-    # it's probably more important to compact the ASDL representation.)
-    self.debug_info = []
-    self.src_paths = []  # list of source paths
+    # reuse these instances in many line_span instances
+    self.source_instances = []  # type: List[source_t]
 
-  def PushSource(self, src_path):
-    self.src_paths.append(src_path)
+  def PushSource(self, src):
+    # type: (source_t) -> None
+    self.source_instances.append(src)
 
   def PopSource(self):
-    self.src_paths.pop()
+    # type: () -> None
+    self.source_instances.pop()
 
   def AddLine(self, line, line_num):
-    """
-    Args:
-      line: string
-      line_num: physical line number, for printing
+    # type: (str, int) -> int
+    """Save a physical line and return a line_id for later retrieval.
 
-    TODO: Add an option of whether to save the line?  You can retrieve it on
-    disk in many cases.  (But not in the stdin, '-c', 'eval' case)
+    The line number is 1-based.
     """
-    line_id = self.next_line_id
-    self.lines.append(line)
-    self.next_line_id += 1
-    self.debug_info.append((self.src_paths[-1], line_num))
+    line_id = len(self.line_vals)
+    self.line_vals.append(line)
+    self.line_nums.append(line_num)
+    self.line_srcs.append(self.source_instances[-1])
     return line_id
 
   def GetLine(self, line_id):
-    """
-    Given an line ID, return the actual filename, physical line number, and
-    line contents.
+    # type: (int) -> str
+    """Return the text of a line.
+
+    TODO: This should be hidden behind an interface like Python's line cache?
+    It should store offsets (and maybe checkums).  It will have two
+    implementions: in-memory for interactive, and on-disk for batch and
+    'sourced' files.
     """
     assert line_id >= 0, line_id
-    return self.lines[line_id]
+    return self.line_vals[line_id]
 
-  def AddLineSpan(self, line_span):
-    """
-    TODO: Add an option of whether to save the line?  You can retrieve it on
-    disk in many cases.
-    """
-    span_id = self.next_span_id
-    self.spans.append(line_span)
-    self.next_span_id += 1
+  def GetLineNumber(self, line_id):
+    # type: (int) -> int
+    return self.line_nums[line_id]
+
+  # NOTE: Not used yet.  Using an intern table seems like a good idea, but I
+  # haven't measured the performance benefit of it.  The case I'm thinking of
+  # is where you have a tight loop and every line uses $LINENO.  It's better to
+  # create 3 objects rather than 3*N objects, where N is the number of loop
+  # iterations.
+  def GetLineNumStr(self, line_id):
+    # type: (int) -> str
+    line_num = self.line_nums[line_id]
+    try:
+      return self.line_num_strs[line_num]
+    except KeyError:
+      s = str(line_num)
+      self.line_num_strs[line_num] = s
+      return s
+
+  def GetLineSource(self, line_id):
+    # type: (int) -> source_t
+    return self.line_srcs[line_id]
+
+  def GetLineSourceString(self, line_id):
+    # type: (int) -> str
+    """Returns a human-readable string for dev tools."""
+    src = self.line_srcs[line_id]
+    UP_src = src
+
+    # TODO: Make it look nicer, like core/ui.py.
+    tag = src.tag_()
+    if tag == source_e.CFlag:
+      return '-c flag'
+    if tag == source_e.MainFile:
+      src = cast(source__MainFile, UP_src)
+      return src.path
+    if tag == source_e.SourcedFile:
+      src = cast(source__SourcedFile, UP_src)
+      return src.path
+    return repr(src)
+
+  def AddLineSpan(self, line_id, col, length):
+    # type: (int, int, int) -> int
+    """Save a line_span and return a new span ID for later retrieval."""
+    span_id = len(self.spans)  # spids are just array indices
+    span = line_span(line_id, col, length)
+    self.spans.append(span)
     return span_id
 
   def GetLineSpan(self, span_id):
-    assert span_id != const.NO_INTEGER, span_id
+    # type: (int) -> line_span
+    assert span_id != runtime.NO_SPID, span_id
     try:
       return self.spans[span_id]
     except IndexError:
-      util.log('Span ID out of range: %d is greater than %d', span_id,
+      log('Span ID out of range: %d is greater than %d', span_id,
           len(self.spans))
       raise
 
   def LastSpanId(self):
+    # type: () -> int
     """Return one past the last span ID."""
     return len(self.spans)
-
-  def GetDebugInfo(self, line_id):
-    """Get the path and physical line number, for parse errors."""
-    assert line_id != const.NO_INTEGER, line_id
-    path, line_num = self.debug_info[line_id]
-    return path, line_num
-
-
-# TODO: Remove this.  There are many sources of code, and they are hard to
-# divide strictly into arenas.
-def SideArena(source_name):
-  """A new arena outside the main one.
-  
-  For completion, $PS1 and $PS4, a[x++]=1, etc.
-
-  Translation takes advantage of the fact that arenas have contiguous span_ids.
-  """
-  # TODO: Should there only be one pool?  This isn't worked out yet.  Or just
-  # get rid of the pool concept?
-  pool = Pool()
-  arena = pool.NewArena()
-  arena.PushSource(source_name)
-  return arena
-
-
-# In C++, InteractiveLineReader and StringLineReader should use the same
-# representation: std::string with internal NULs to terminate lines, and then
-# std::vector<char*> that points into to it.
-# InteractiveLineReader only needs to save a line if it contains a function.
-# The parser needs to set a flag if it contains a function!
-
-class Pool(object):
-  """Owns source lines plus debug info.
-
-  Two use cases:
-  1. Reformatting: PopArena() is never called
-  2. Execution: PopArena() is called if an arena doesn't have any functions.
-  If the whole thing was executed.
-
-  At the end of the program, all remaining arenas can be freed, or we just let
-  the OS clean up.  Probably in debug/ASAN mode, we will clean it up.  We also
-  want to clean up in embedded mode.  the oil_Init() and oil_Destroy() methods
-  of the API should do this.
-  """
-  def __init__(self):
-    self.arenas = []
-    self.next_arena_id = 0
-
-  # NOTE: dash uses a similar scheme.  stalloc() / setstackmark() /
-  # popstackmark() in memalloc.c.
-
-  # We're not using Push/POp terminology because you never pop twice.  You can
-  # only destroy the top/last arena.
-  def NewArena(self):
-    """Call this after parsing anything that you might want to destroy."""
-    a = Arena(self.next_arena_id)
-    self.next_arena_id += 1
-    self.arenas.append(a)
-    return a
-
-
-# TODO: Also need arena_id
-
-# NOTE: Not used right now.
-def SpanValue(span, arena):
-  """Given an line_span and a arena of lines, return the string value.
-  """
-  line = arena.GetLine(span.line_id)
-  c = span.col
-  return line[c : c + span.length]

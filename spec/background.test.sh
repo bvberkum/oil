@@ -21,15 +21,21 @@ wait -n
 ## OK dash status: 2
 ## OK mksh status: 1
 
-#### wait with invalid job ID
+#### wait with jobspec syntax %nonexistent
 wait %nonexistent
 ## status: 127
 ## OK dash status: 2
 
 #### wait with invalid PID
-wait %nonexistent
+wait 12345678
 ## status: 127
-## OK dash status: 2
+
+#### wait with invalid arg
+wait zzz
+## status: 2
+## OK bash status: 1
+# mksh confuses a syntax error with 'command not found'!
+## BUG mksh status: 127
 
 #### Builtin in background
 echo async &
@@ -47,17 +53,22 @@ wait $!
 echo status=$?
 ## stdout: status=99
 
-#### Wait sets PIPESTATUS
+#### Wait for job doesn't support PIPESTATUS
+
+# foreground works
+{ echo hi; exit 55; } | { exit 99; }
+echo pipestatus=${PIPESTATUS[@]}
+
+# background doesn't work
 { echo hi; exit 55; } | { exit 99; } &
-echo "pipestatus=${PIPESTATUS[@]}"
-wait $!
-echo status=$?
-echo "pipestatus=${PIPESTATUS[@]}"
-## stdout-json: "pipestatus=\nstatus=99\npipestatus=55 99\n"
-## BUG bash stdout-json: "pipestatus=\nstatus=99\npipestatus=0\n"
-## N-I mksh stdout-json: "pipestatus=0\nstatus=99\npipestatus=0\n"
-## N-I dash stdout-json: ""
+wait %+
+echo pipestatus=${PIPESTATUS[@]}
+## STDOUT:
+pipestatus=55 99
+pipestatus=99
+##
 ## N-I dash status: 2
+## N-I dash stdout-json: ""
 
 #### Brace group in background, wait all
 { sleep 0.09; exit 9; } &
@@ -115,3 +126,20 @@ echo ${bar=2} &
 wait
 echo $bar  # bar is NOT SET in the parent process
 ## stdout-json: "1\n1\n2\n\n"
+
+#### Background process and then a singleton pipeline
+
+# This was inspired by #416, although that symptom there was timing, so it's
+# technically not a regression test.  It's hard to test timing.
+
+{ sleep 0.1; exit 42; } &
+echo begin
+! true
+echo end
+wait $!
+echo status=$?
+## STDOUT:
+begin
+end
+status=42
+## END

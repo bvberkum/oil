@@ -6,6 +6,8 @@
 _build/oil/main_name.c:
 	$(ACTIONS_SH) main-name bin.oil oil.ovm > $@
 
+OIL_PYPATH := $(REPO_ROOT):$(REPO_ROOT)/vendor
+
 # Dependencies calculated by importing main.
 # NOTE: The list of files is used both to compile and to make a tarball.
 # - For compiling, we should respect _HAVE_READLINE in detected_config
@@ -15,20 +17,18 @@ _build/oil/main_name.c:
 # package.  build/doc.sh currently makes _build/__init__.py.
 _build/oil/app-deps-%.txt: _build/detected-config.sh build/app_deps.py
 	test -d _build/oil && \
-	  $(ACTIONS_SH) app-deps oil $(REPO_ROOT) bin.oil
+	  $(ACTIONS_SH) app-deps oil $(OIL_PYPATH) bin.oil
 
 _build/oil/py-to-compile.txt: _build/detected-config.sh build/app_deps.py
 	test -d _build/oil && \
-	  $(ACTIONS_SH) py-to-compile $(REPO_ROOT) bin.oil > $@
-
-_devbuild/gen/osh_help.py: doc/osh-quick-ref-pages.txt
-	build/doc.sh osh-quick-ref
+		$(ACTIONS_SH) py-to-compile $(OIL_PYPATH) bin.oil > $@
 
 # NOTE: I should really depend on every file in build/oil-manifest.txt!
 OIL_BYTECODE_DEPS := \
 	_build/release-date.txt \
 	build/oil-manifest.txt \
-	_devbuild/gen/osh_help.py
+	_devbuild/gen/help_.py \
+	_devbuild/gen/help_index.py
 
 # NOTES:
 # - _devbuild/gen/osh_help.py is a minor hack to depend on the entire
@@ -43,7 +43,7 @@ _build/oil/bytecode-cpython-manifest.txt: $(OIL_BYTECODE_DEPS) \
 	{ echo '_build/release-date.txt release-date.txt'; \
 	  cat build/oil-manifest.txt \
 	      _build/oil/app-deps-cpython.txt \
-	  $(ACTIONS_SH) quick-ref-manifest _devbuild/osh-quick-ref; \
+	  $(ACTIONS_SH) help-manifest _devbuild/help; \
 	  $(ACTIONS_SH) pyc-version-manifest $@; \
 	} > $@
 
@@ -52,7 +52,7 @@ _build/oil/bytecode-opy-manifest.txt: $(OIL_BYTECODE_DEPS) \
 	{ echo '_build/release-date.txt release-date.txt'; \
 	  cat build/oil-manifest.txt \
 	      _build/oil/opy-app-deps.txt; \
-	  $(ACTIONS_SH) quick-ref-manifest _devbuild/osh-quick-ref; \
+	  $(ACTIONS_SH) help-manifest _devbuild/help; \
 	  $(ACTIONS_SH) pyc-version-manifest $@; \
 	} > $@
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 args.py - Flag, option, and arg parsing for the shell.
 
@@ -57,32 +56,50 @@ However I don't see these used anywhere!  I only see ':' used.
 """
 from __future__ import print_function
 
-import libc
-from core import util
+from asdl import runtime
+from core.util import log
 
-log = util.log
+import libc  # for regex support
+
+from typing import Tuple, Optional, Dict, Union, List, Any, IO, TYPE_CHECKING
+from _devbuild.gen.runtime_asdl import cmd_value__Argv
+
+if TYPE_CHECKING:
+  OptChange = Tuple[str, bool]
 
 
 class UsageError(Exception):
   """Raised by builtins upon flag parsing error."""
-  pass
+
+  # TODO: Should this be _ErrorWithLocation?  Probably, even though we only use
+  # 'span_id'.
+  def __init__(self, msg, span_id=runtime.NO_SPID):
+    # type: (str, int) -> None
+    self.msg = msg
+    self.span_id = span_id
 
 
 class _Attributes(object):
   """Object to hold flags"""
 
   def __init__(self, defaults):
-    self.opt_changes = []  # for set -o, etc.
-    self.actions = []  # for compgen -A
+    # type: (Dict[str, Any]) -> None
+
+    self.opt_changes = []  # type: List[OptChange]  # -o errexit +o nounset
+    self.shopt_changes = []  # type: List[OptChange]  # -O nullglob +O nullglob
+    self.show_options = False  # 'set -o' without an argument
+    self.actions = []  # type: List[str]  # for compgen -A
     self.saw_double_dash = False  # for set --
     for name, v in defaults.iteritems():
       self.Set(name, v)
 
   def Set(self, name, value):
+    # type: (str, Union[None, bool, str]) -> None
     # debug-completion -> debug_completion
     setattr(self, name.replace('-', '_'), value)
 
   def __repr__(self):
+    # type: () -> str
     return '<_Attributes %s>' % self.__dict__
 
 
@@ -94,41 +111,101 @@ class Reader(object):
   The caller of the flags parser can continue to use it after flag parsing is
   done to get args.
   """
-  def __init__(self, argv):
+  def __init__(self, argv, spids=None):
+    # type: (List[str], Optional[List[int]]) -> None
     self.argv = argv
+    self.spids = spids
     self.n = len(argv)
     self.i = 0
 
   def __repr__(self):
+    # type: () -> str
     return '<args.Reader %r %d>' % (self.argv, self.i)
 
   def Next(self):
+    # type: () -> None
     """Advance."""
     self.i += 1
 
   def Peek(self):
-    return self.argv[self.i]
+    # type: () -> Optional[str]
+    """Return the next token, or None if there are no more.
+
+    None is your SENTINEL for parsing.
+    """
+    if self.i >= self.n:
+      return None
+    else:
+      return self.argv[self.i]
+
+  def Peek2(self):
+    # type: () -> Tuple[Optional[str], int]
+    """Return the next token, or None if there are no more.
+
+    None is your SENTINEL for parsing.
+    """
+    if self.i >= self.n:
+      return None, -1
+    else:
+      return self.argv[self.i], self.spids[self.i]
 
   def ReadRequired(self, error_msg):
+    # type: (str) -> str
+    arg = self.Peek()
+    if arg is None:
+      # point at argv[0]
+      raise UsageError(error_msg, span_id=self._FirstSpanId())
     self.Next()
-    try:
-      return self.Peek()
-    except IndexError:
-      # TODO: Format it
-      raise UsageError(error_msg)
+    return arg
+
+  def ReadRequired2(self, error_msg):
+    # type: (str) -> Tuple[str, int]
+    arg = self.Peek()
+    if arg is None:
+      # point at argv[0]
+      raise UsageError(error_msg, span_id=self._FirstSpanId())
+    spid = self.spids[self.i]
+    self.Next()
+    return arg, spid
 
   def Rest(self):
+    # type: () -> List[str]
     """Return the rest of the arguments."""
     return self.argv[self.i:]
 
+  def Rest2(self):
+    # type: () -> Tuple[List[str], List[int]]
+    """Return the rest of the arguments."""
+    return self.argv[self.i:], self.spids[self.i:]
+
   def AtEnd(self):
-    return self.i == self.n
+    # type: () -> bool
+    return self.i >= self.n  # must be >= and not ==
+
+  def _FirstSpanId(self):
+    # type: () -> int
+    if self.spids:
+      return self.spids[0]
+    else:
+      return runtime.NO_SPID  # TODO: remove this when all have spids
+
+  def SpanId(self):
+    # type: () -> int
+    if self.spids:
+      if self.i == self.n:
+        i = self.n - 1  # if the last arg is missing, point at the one before
+      else:
+        i = self.i
+      return self.spids[i]
+    else:
+      return runtime.NO_SPID  # TODO: remove this when all have spids
 
 
 class _Action(object):
   """What is done when a flag or option is detected."""
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (str, str, Reader, _Attributes) -> bool
     """Called when the flag matches.
 
     Args:
@@ -140,12 +217,13 @@ class _Action(object):
     Returns:
       True if flag parsing should be aborted.
     """
-    raise NotImplementedError
+    raise NotImplementedError()
 
 
 class SetToArg(_Action):
 
   def __init__(self, name, arg_type, quit_parsing_flags=False):
+    # type: (str, Union[List[str], int], bool) -> None
     """
     Args:
       quit_parsing_flags: Stop parsing args after this one.  for sh -c.
@@ -157,34 +235,44 @@ class SetToArg(_Action):
     self.quit_parsing_flags = quit_parsing_flags
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (Optional[str], Optional[str], Reader, _Attributes) -> bool
     """Called when the flag matches."""
 
     if suffix:  # for the ',' in -d,
       arg = suffix
     else:
       arg_r.Next()
-      try:
-        arg = arg_r.Peek()
-      except IndexError:
-        raise UsageError('Expected argument for %r' % ('-' + self.name))
-
-    #log('SetToArg arg %r', arg)
+      arg = arg_r.Peek()
+      if arg is None:
+        raise UsageError(
+            'expected argument to %r' % ('-' + self.name), span_id=arg_r.SpanId())
 
     typ = self.arg_type
     if isinstance(typ, list):
       if arg not in typ:
-        raise UsageError('Invalid argument %r, expected one of: %s' %
-            (arg, ', '.join(typ)))
-      value = arg
+        raise UsageError(
+            'got invalid argument %r to %r, expected one of: %s' %
+            (arg, ('-' + self.name), ', '.join(typ)), span_id=arg_r.SpanId())
+      value = arg  # type: Any
     else:
       if typ == Str:
         value = arg
       elif typ == Int:
-        value = int(arg)  # TODO: check errors
+        try:
+          value = int(arg)
+        except ValueError:
+          raise UsageError(
+              'expected integer after %r, got %r' % ('-' + self.name, arg),
+              span_id=arg_r.SpanId())
       elif typ == Float:
-        value = float(arg)  # TODO: check errors
+        try:
+          value = float(arg)
+        except ValueError:
+          raise UsageError(
+              'expected number after %r, got %r' % ('-' + self.name, arg),
+              span_id=arg_r.SpanId())
       else:
-        raise AssertionError
+        raise AssertionError()
 
     out.Set(self.name, value)
     return self.quit_parsing_flags
@@ -194,9 +282,11 @@ class SetBoolToArg(_Action):
   """This is the Go-like syntax of --verbose=1, --verbose, or --verbose=0."""
 
   def __init__(self, name):
+    # type: (str) -> None
     self.name = name
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (Optional[Any], Optional[str], Reader, _Attributes) -> None
     """Called when the flag matches."""
 
     if suffix:  # '0' in --verbose=0
@@ -205,19 +295,38 @@ class SetBoolToArg(_Action):
       elif suffix in ('1', 'T', 'true', 'Talse'):
         value = True
       else:
-        raise UsageError('Invalid argument to boolean flag: %r' % suffix)
+        raise UsageError(
+            'got invalid argument to boolean flag: %r' % suffix)
     else:
       value = True
 
     out.Set(self.name, value)
 
 
-class SetToTrue(_Action):
+class SetShortOption(_Action):
 
   def __init__(self, name):
+    # type: (str) -> None
     self.name = name
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (Optional[Any], str, Reader, _Attributes) -> None
+    """Called when the flag matches.
+
+    Args:
+      suffix: - or + (not really a suffix)
+    """
+    out.Set(self.name, suffix)
+
+
+class SetToTrue(_Action):
+
+  def __init__(self, name):
+    # type: (str) -> None
+    self.name = name
+
+  def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (Optional[Any], Optional[Any], Reader, _Attributes) -> None
     """Called when the flag matches."""
     out.Set(self.name, True)
 
@@ -226,9 +335,11 @@ class SetOption(_Action):
   """ Set an option to a boolean, for 'set +e' """
 
   def __init__(self, name):
+    # type: (str) -> None
     self.name = name
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (str, Optional[Any], Reader, _Attributes) -> None
     """Called when the flag matches."""
     b = (prefix == '-')
     out.opt_changes.append((self.name, b))
@@ -237,36 +348,45 @@ class SetOption(_Action):
 class SetNamedOption(_Action):
   """Set a named option to a boolean, for 'set +o errexit' """
 
-  def __init__(self):
-    self.names = []
+  def __init__(self, shopt=False):
+    # type: (bool) -> None
+    self.names = []  # type: List[str]
+    self.shopt = shopt
 
   def Add(self, name):
+    # type: (str) -> None
     self.names.append(name)
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (str, Optional[Any], Reader, _Attributes) -> bool
     """Called when the flag matches."""
     b = (prefix == '-')
     #log('SetNamedOption %r %r %r', prefix, suffix, arg_r)
     arg_r.Next()  # always advance
-    try:
-      arg = arg_r.Peek()
-    except IndexError:
-      raise UsageError('Expected argument for option')
+    arg = arg_r.Peek()
+    if arg is None:
+      out.show_options = True
+      return True  # quit parsing
 
     attr_name = arg
     # Validate the option name against a list of valid names.
     if attr_name not in self.names:
-      raise UsageError('Invalid option name %r' % arg)
-    out.opt_changes.append((attr_name, b))
+      raise UsageError('got invalid option %r' % arg, span_id=arg_r.SpanId())
+
+    changes = out.shopt_changes if self.shopt else out.opt_changes
+    changes.append((attr_name, b))
+    return False
 
 
 class SetAction(_Action):
   """ For compgen -f """
 
   def __init__(self, name):
+    # type: (str) -> None
     self.name = name
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (str, str, Reader, _Attributes) -> None
     out.actions.append(self.name)
 
 
@@ -274,18 +394,20 @@ class SetNamedAction(_Action):
   """ For compgen -A file """
 
   def __init__(self):
-    self.names = []
+    # type: () -> None
+    self.names = []  # type: List[str]
 
   def Add(self, name):
+    # type: (str) -> None
     self.names.append(name)
 
   def OnMatch(self, prefix, suffix, arg_r, out):
+    # type: (str, Optional[Any], Reader, _Attributes) -> None
     """Called when the flag matches."""
     #log('SetNamedOption %r %r %r', prefix, suffix, arg_r)
     arg_r.Next()  # always advance
-    try:
-      arg = arg_r.Peek()
-    except IndexError:
+    arg = arg_r.Peek()
+    if arg is None:
       raise UsageError('Expected argument for action')
 
     attr_name = arg
@@ -314,18 +436,22 @@ class FlagsAndOptions(object):
   """
 
   def __init__(self):
-    self.actions_short = {}  # {'-c': _Action}
-    self.actions_long = {}  # {'--rcfile': _Action}
-    self.attr_names = {}  # attributes that name flags
-    self.defaults = {}
+    # type: () -> None
+    self.actions_short = {}  # type: Dict[str, _Action]  # {'-c': _Action}
+    self.actions_long = {}  # type: Dict[str, _Action]  # {'--rcfile': _Action}
+    self.attr_names = {}  # type: Dict[str, str]  # attributes that name flags
+    self.defaults = {}  # type: Dict[str, Any]
 
     self.actions_short['o'] = SetNamedOption()  # -o and +o
+    self.actions_short['O'] = SetNamedOption(shopt=True)  # -O and +O
 
   def InitActions(self):
+    # type: () -> None
     self.actions_short['A'] = SetNamedAction()  # -A
 
   def ShortFlag(self, short_name, arg_type=None, default=None,
                 quit_parsing_flags=False, help=None):
+    # type: (str, int, Optional[Any], bool, Optional[Any]) -> None
     """ -c """
     assert short_name.startswith('-'), short_name
     assert len(short_name) == 2, short_name
@@ -340,7 +466,13 @@ class FlagsAndOptions(object):
 
     self.attr_names[char] = default
 
-  def LongFlag(self, long_name, arg_type=None, default=None):
+  def LongFlag(self,
+               long_name,  # type: str
+               arg_type=None,  # type: Union[List[str], None, int]
+               default=None,  # type: Optional[Any]
+               help=None,  # type: Optional[Any]
+               ):
+    # type: (...) -> None
     """ --rcfile """
     assert long_name.startswith('--'), long_name
 
@@ -353,6 +485,7 @@ class FlagsAndOptions(object):
     self.attr_names[name] = default
 
   def Option(self, short_flag, name, help=None):
+    # type: (Optional[str], str, Optional[Any]) -> None
     """Register an option that can be -e or -o errexit.
 
     Args:
@@ -364,9 +497,20 @@ class FlagsAndOptions(object):
       assert not short_flag.startswith('-'), short_flag
       self.actions_short[short_flag] = SetOption(attr_name)
 
-    self.actions_short['o'].Add(attr_name)
+    self.actions_short['o'].Add(attr_name)  # type: ignore
+
+  def ShoptOption(self, name, help=None):
+    # type: (str, Optional[str]) -> None
+    """Register an option like shopt -s nullglob
+
+    Args:
+      name: 'nullglob'
+    """
+    attr_name = name
+    self.actions_short['O'].Add(attr_name)  # type: ignore
 
   def Action(self, short_flag, name):
+    # type: (str, str) -> None
     """Register an action that can be -f or -A file.
 
     For the compgen builtin.
@@ -380,9 +524,10 @@ class FlagsAndOptions(object):
       assert not short_flag.startswith('-'), short_flag
       self.actions_short[short_flag] = SetAction(attr_name)
 
-    self.actions_short['A'].Add(attr_name)
+    self.actions_short['A'].Add(attr_name)  # type: ignore
 
   def Parse(self, arg_r):
+    # type: (Reader) -> _Attributes
     """Return attributes and an index.
 
     Respects +, like set +eu
@@ -413,7 +558,9 @@ class FlagsAndOptions(object):
         try:
           action = self.actions_long[arg]
         except KeyError:
-          raise UsageError('Invalid flag %r' % arg)
+          raise UsageError(
+              'got invalid flag %r' % arg, span_id=arg_r.SpanId())
+
         # TODO: Suffix could be 'bar' for --foo=bar
         action.OnMatch(None, None, arg_r, out)
         arg_r.Next()
@@ -426,8 +573,8 @@ class FlagsAndOptions(object):
           try:
             action = self.actions_short[char]
           except KeyError:
-            #print(self.actions_short)
-            raise UsageError('Invalid flag %r' % char)
+            raise UsageError(
+                'got invalid flag %r' % ('-' + char), span_id=arg_r.SpanId())
           quit = action.OnMatch(char0, None, arg_r, out)
         arg_r.Next() # process the next flag
         if quit:
@@ -440,7 +587,7 @@ class FlagsAndOptions(object):
     return out
 
 
-# TODO: Rename ShBuiltinFlags
+# TODO: Rename OshBuiltinFlags
 class BuiltinFlags(object):
   """Parser for sh builtins, like 'read' or 'echo' (which has a special case).
 
@@ -450,20 +597,27 @@ class BuiltinFlags(object):
     opts, i = spec.Parse(argv)
   """
   def __init__(self):
-    self.arity0 = {}  # {'r': _Action}  e.g. read -r
-    self.arity1 = {}  # {'t': _Action}  e.g. read -t 1.0
+    # type: () -> None
+    self.arity0 = {}  # type: Dict[str, _Action]  # {'r': _Action} for read -r
+    self.arity1 = {}  # type: Dict[str, _Action]  # {'t': _Action} for read -t 1.0
+    self.options = {}  # type: Dict[str, _Action]
 
-    self.attr_names = {}
+    self.attr_names = {}  # type: Dict[str, str]
 
   def PrintHelp(self, f):
-    print('[0]')
+    # type: (IO[bytes]) -> None
+    if self.arity0:
+      print('  arity 0:')
     for ch in self.arity0:
-      print(ch)
-    print('[1]')
+      print('    -%s' % ch)
+
+    if self.arity1:
+      print('  arity 1:')
     for ch in self.arity1:
-      print(ch)
+      print('    -%s' % ch)
 
   def ShortFlag(self, short_name, arg_type=None, help=None):
+    # type: (str, Optional[int], Optional[Any]) -> None
     """
     This is very similar to ShortFlag for FlagsAndOptions, except we have
     separate arity0 and arity1 dicts.
@@ -479,7 +633,14 @@ class BuiltinFlags(object):
 
     self.attr_names[char] = None
 
+  def ShortOption(self, char, help=None):
+    # type: (str, Optional[Any]) -> None
+    assert len(char) == 1  # 'r' for -r +r
+    self.options[char] = SetShortOption(char)
+    self.attr_names[char] = None
+
   def ParseLikeEcho(self, argv):
+    # type: (List[str]) -> Tuple[_Attributes, int]
     """
     echo is a special case.  These work:
       echo -n
@@ -512,17 +673,12 @@ class BuiltinFlags(object):
 
     return out, arg_r.i
 
-  def Parse(self, argv):
-    # TODO: Parse -en into separate actions
-    # Also read -t1.0 is supposed to be an arg!
-    # So you have to know which one it is.  Is it an arg with flag?
-    # So look up the first one
-
+  def Parse(self, arg_r):
+    # type: (Reader) -> Tuple[_Attributes, int]
+    """For builtins to read args after we parse flags."""
     # NOTE about -:
     # 'set -' ignores it, vs set
     # 'unset -' or 'export -' seems to treat it as a variable name
-
-    arg_r = Reader(argv)
     out = _Attributes(self.attr_names)
 
     while not arg_r.AtEnd():
@@ -537,6 +693,11 @@ class BuiltinFlags(object):
         for i in xrange(1, n):  # parse flag combos like -rx
           char = arg[i]
 
+          if char in self.options:
+            action = self.options[char]
+            action.OnMatch(None, '-', arg_r, out)
+            continue
+
           if char in self.arity0:  # e.g. read -r
             action = self.arity0[char]
             action.OnMatch(None, None, arg_r, out)
@@ -548,7 +709,23 @@ class BuiltinFlags(object):
             action.OnMatch(None, suffix, arg_r, out)
             break
 
-          raise UsageError('Invalid flag %r' % char)
+          raise UsageError(
+              "doesn't accept flag %s" % ('-' + char), span_id=arg_r.SpanId())
+
+        arg_r.Next()  # next arg
+
+      # Only accept + if there are ANY options defined, e.g. for declare +rx.
+      elif self.options and arg.startswith('+') and len(arg) > 1:
+        n = len(arg)
+        for i in xrange(1, n):  # parse flag combos like -rx
+          char = arg[i]
+          if char in self.options:
+            action = self.options[char]
+            action.OnMatch(None, '+', arg_r, out)
+            continue
+
+          raise UsageError(
+              "doesn't accept option %s" % ('+' + char), span_id=arg_r.SpanId())
 
         arg_r.Next()  # next arg
 
@@ -556,6 +733,19 @@ class BuiltinFlags(object):
         break
 
     return out, arg_r.i
+
+  def ParseCmdVal(self, cmd_val):
+    # type: (cmd_value__Argv) -> Tuple[_Attributes, int]
+    """Used by builtins that don't need to read more args from."""
+    arg_r = Reader(cmd_val.argv, spids=cmd_val.arg_spids)
+    arg_r.Next()  # move past the builtin name
+    return self.Parse(arg_r)
+
+  def ParseArgv(self, argv):
+    # type: (List[str]) -> Tuple[_Attributes, int]
+    """For tools/readlink.py -- no location info available."""
+    arg_r = Reader(argv)
+    return self.Parse(arg_r)
 
 
 # - A flag can start with one or two dashes, but not three
@@ -588,7 +778,7 @@ class OilFlags(object):
   Another idea:
 
     input = ArgInput(argv)
-    action = input.ReadRequiredArg(error='An action is required')
+    action = input.ReadRequired(error='An action is required')
 
   The rest should be similar to Go flags.
   https://golang.org/pkg/flag/
@@ -621,11 +811,14 @@ class OilFlags(object):
   You can just attach that to every spec, like DefineOshCommonOptions(spec).
   """
   def __init__(self):
-    self.arity1 = {}
-    self.attr_names = {}  # attr name -> default value
-    self.help_strings = []  # (flag name, string) tuples, in order
+    # type: () -> None
+    self.arity1 = {}  # type: Dict[str, _Action]
+    self.attr_names = {}  # type: Dict[str, Any]  # attr name -> default value
+    # (flag name, string) tuples, in order
+    self.help_strings = []  # type: List[Tuple[str, str]]
 
   def Flag(self, name, arg_type, default=None, help=None):
+    # type: (str, int, Optional[bool], Optional[Any]) -> None
     """
     Args:
       name: e.g. '-no-docstring'
@@ -641,8 +834,8 @@ class OilFlags(object):
 
     self.attr_names[attr_name] = default
 
-  def Parse(self, argv):
-    arg_r = Reader(argv)
+  def Parse(self, arg_r):
+    # type: (Reader) -> Tuple[_Attributes, int]
     out = _Attributes(self.attr_names)
 
     while not arg_r.AtEnd():
@@ -675,7 +868,6 @@ class OilFlags(object):
           action.OnMatch(None, suffix, arg_r, out)
         else:
           raise UsageError('Unrecognized flag %r' % arg)
-          pass
 
         arg_r.Next()  # next arg
 
@@ -683,3 +875,9 @@ class OilFlags(object):
         break
 
     return out, arg_r.i
+
+  def ParseArgv(self, argv):
+    # type: (List[str]) -> Tuple[_Attributes, int]
+    """For tools/readlink.py -- no location info available."""
+    arg_r = Reader(argv)
+    return self.Parse(arg_r)

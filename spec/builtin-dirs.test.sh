@@ -1,5 +1,46 @@
 #!/bin/bash
 
+#### pushd/popd
+set -o errexit
+cd /
+pushd /tmp
+echo -n pwd=; pwd
+popd
+echo -n pwd=; pwd
+## status: 0
+## STDOUT:
+/tmp /
+pwd=/tmp
+/
+pwd=/
+## END
+## OK zsh STDOUT:
+pwd=/tmp
+pwd=/
+## END
+## N-I dash/mksh status: 127
+## N-I dash/mksh stdout-json: ""
+
+#### popd usage error
+pushd / >/dev/null
+popd zzz
+echo status=$?
+## STDOUT:
+status=2
+## END
+## BUG zsh STDOUT:
+status=0
+## END
+
+#### popd returns error on empty directory stack
+message=$(popd 2>&1)
+echo $?
+echo "$message" | grep -o "directory stack"
+## STDOUT:
+1
+directory stack
+## END
+
 #### dirs builtin
 cd /
 dirs
@@ -31,7 +72,7 @@ cd /
 pushd /tmp >/dev/null
 echo --
 dirs -v
-pushd /lib >/dev/null
+pushd /dev >/dev/null
 echo --
 dirs -v
 ## status: 0
@@ -40,13 +81,13 @@ dirs -v
  0  /tmp
  1  /
 --
- 0  /lib
+ 0  /dev
  1  /tmp
  2  /
 ## END
 #
 #  zsh uses tabs
-## OK zsh stdout-json: "--\n0\t/tmp\n1\t/\n--\n0\t/lib\n1\t/tmp\n2\t/\n"
+## OK zsh stdout-json: "--\n0\t/tmp\n1\t/\n--\n0\t/dev\n1\t/tmp\n2\t/\n"
 
 #### dirs -p to print one entry per line
 set -o errexit
@@ -54,7 +95,7 @@ cd /
 pushd /tmp >/dev/null
 echo --
 dirs -p
-pushd /lib >/dev/null
+pushd /dev >/dev/null
 echo --
 dirs -p
 ## STDOUT:
@@ -62,7 +103,7 @@ dirs -p
 /tmp
 /
 --
-/lib
+/dev
 /tmp
 /
 ## END

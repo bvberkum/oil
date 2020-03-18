@@ -140,5 +140,8 @@ one
 EOF1
 three
 EOF2
-## stdout-json: "one\ntwo\nthree\n"
-
+## STDOUT:
+one
+two
+three
+## END

@@ -10,7 +10,10 @@ f() { export GLOBAL=X; }
 f
 echo $GLOBAL
 printenv.py GLOBAL
-## stdout-json: "X\nX\n"
+## STDOUT:
+X
+X
+## END
 
 #### Export sets a global variable that persists after export -n
 f() { export GLOBAL=X; }
@@ -20,19 +23,56 @@ printenv.py GLOBAL
 export -n GLOBAL
 echo $GLOBAL
 printenv.py GLOBAL
-## stdout-json: "X\nX\nX\nNone\n"
-## N-I mksh/dash stdout-json: "X\nX\n"
+## STDOUT: 
+X
+X
+X
+None
+## END
+## N-I mksh/dash STDOUT:
+X
+X
+## END
 ## N-I mksh status: 1
 ## N-I dash status: 2
+## N-I zsh STDOUT:
+X
+X
+X
+X
+## END
 
 #### export -n undefined is ignored
 set -o errexit
 export -n undef
 echo status=$?
 ## stdout: status=0
-## N-I mksh/dash stdout-json: ""
+## N-I mksh/dash/zsh stdout-json: ""
 ## N-I mksh status: 1
-## N-I dash  status: 2
+## N-I dash status: 2
+## N-I zsh status: 1
+
+#### export -n foo=bar not allowed
+foo=old
+export -n foo=new
+echo status=$?
+echo $foo
+## STDOUT:
+status=2
+old
+## END
+## OK bash STDOUT:
+status=0
+new
+## END
+## N-I zsh STDOUT:
+status=1
+old
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+## N-I mksh status: 1
+## N-I mksh stdout-json: ""
 
 #### Export a global variable and unset it
 f() { export GLOBAL=X; }
@@ -40,16 +80,24 @@ f
 echo $GLOBAL
 printenv.py GLOBAL
 unset GLOBAL
-echo $GLOBAL
+echo g=$GLOBAL
 printenv.py GLOBAL
-## stdout-json: "X\nX\n\nNone\n"
+## STDOUT: 
+X
+X
+g=
+None
+## END
 
 #### Export existing global variables
 G1=g1
 G2=g2
 export G1 G2
 printenv.py G1 G2
-## stdout-json: "g1\ng2\n"
+## STDOUT: 
+g1
+g2
+## END
 
 #### Export existing local variable
 f() {
@@ -59,7 +107,10 @@ f() {
 }
 f
 printenv.py L1
-## stdout-json: "local1\nNone\n"
+## STDOUT: 
+local1
+None
+## END
 
 #### Export a local that shadows a global
 V=global
@@ -72,13 +123,33 @@ f
 printenv.py V  # exported local out of scope; global isn't exported yet
 export V
 printenv.py V  # now it's exported
-## stdout-json: "local1\nNone\nglobal\n"
+## STDOUT: 
+local1
+None
+global
+## END
 
 #### Export a variable before defining it
 export U
 U=u
 printenv.py U
 ## stdout: u
+
+#### Unset exported variable, then define it again.  It's NOT still exported.
+export U
+U=u
+printenv.py U
+unset U
+printenv.py U
+U=newvalue
+echo $U
+printenv.py U
+## STDOUT:
+u
+None
+newvalue
+None
+## END
 
 #### Exporting a parent func variable (dynamic scope)
 # The algorithm is to walk up the stack and export that one.
@@ -96,7 +167,14 @@ outer() {
   printenv.py outer_var
 }
 outer
-## stdout-json: "before inner\nNone\ninner: X\nX\nafter inner\nX\n"
+## STDOUT:
+before inner
+None
+inner: X
+X
+after inner
+X
+## END
 
 #### Dependent export setting
 # FOO is not respected here either.
@@ -111,6 +189,35 @@ new=$PATH
 test "$old" = "$new" && echo "not changed"
 ## stdout: not changed
 
+#### can't export array
+typeset -a a
+a=(1 2 3)
+export a
+printenv.py a
+## STDOUT:
+None
+## END
+## BUG mksh STDOUT:
+1
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+## OK osh status: 1
+## OK osh stdout-json: ""
+
+#### can't export associative array
+typeset -A a
+a["foo"]=bar
+export a
+printenv.py a
+## STDOUT:
+None
+## END
+## N-I mksh status: 1
+## N-I mksh stdout-json: ""
+## OK osh status: 1
+## OK osh stdout-json: ""
+
 #### assign to readonly variable
 # bash doesn't abort unless errexit!
 readonly foo=bar
@@ -120,6 +227,33 @@ echo "status=$?"  # nothing happens
 ## BUG bash stdout: status=1
 ## BUG bash status: 0
 ## OK dash/mksh status: 2
+
+#### Make an existing local variable readonly
+f() {
+	local x=local
+	readonly x
+	echo $x
+	eval 'x=bar'  # Wrap in eval so it's not fatal
+	echo status=$?
+}
+x=global
+f
+echo $x
+## STDOUT:
+local
+status=1
+global
+## END
+## OK dash STDOUT:
+local
+## END
+## OK dash status: 2
+
+# mksh aborts the function, weird
+## OK mksh STDOUT:
+local
+global
+## END
 
 #### assign to readonly variable - errexit
 set -o errexit
@@ -134,7 +268,10 @@ foo=bar
 echo foo=$foo
 unset foo
 echo foo=$foo
-## stdout-json: "foo=bar\nfoo=\n"
+## STDOUT:
+foo=bar
+foo=
+## END
 
 #### Unset exit status
 V=123
@@ -148,8 +285,7 @@ echo status=$?
 ## stdout: status=0
 
 #### Unset readonly variable
-# dash aborts the whole program.  I'm also aborting the whole program because
-# it's a programming error.
+# dash and zsh abort the whole program.   OSH doesn't?
 readonly R=foo
 unset R
 echo status=$?
@@ -157,6 +293,8 @@ echo status=$?
 ## stdout: status=1
 ## OK dash status: 2
 ## OK dash stdout-json: ""
+## OK zsh status: 1
+## OK zsh stdout-json: ""
 
 #### Unset a function without -f
 f() {
@@ -167,8 +305,11 @@ unset f
 f
 ## stdout: foo
 ## status: 127
-## N-I dash/mksh status: 0
-## N-I dash/mksh stdout-json: "foo\nfoo\n"
+## N-I dash/mksh/zsh status: 0
+## N-I dash/mksh/zsh STDOUT:
+foo
+foo
+## END
 
 #### Unset has dynamic scope
 f() {
@@ -178,7 +319,33 @@ foo=bar
 echo foo=$foo
 f
 echo foo=$foo
-## stdout-json: "foo=bar\nfoo=\n"
+## STDOUT:
+foo=bar
+foo=
+## END
+
+#### Unset invalid variable name
+unset %
+echo status=$?
+## STDOUT:
+status=2
+## END
+## OK bash/mksh STDOUT:
+status=1
+## END
+## BUG zsh STDOUT:
+status=0
+## END
+# dash does a hard failure!
+## OK dash stdout-json: ""
+## OK dash status: 2
+
+#### Unset nonexistent variable
+unset _nonexistent__
+echo status=$?
+## STDOUT:
+status=0
+## END
 
 #### Unset -v
 foo() {
@@ -188,7 +355,10 @@ foo=bar
 unset -v foo
 echo foo=$foo
 foo
-## stdout-json: "foo=\nfunction foo\n"
+## STDOUT: 
+foo=
+function foo
+## END
 
 #### Unset -f
 foo() {
@@ -199,24 +369,49 @@ unset -f foo
 echo foo=$foo
 foo
 echo status=$?
-## stdout-json: "foo=bar\nstatus=127\n"
+## STDOUT: 
+foo=bar
+status=127
+## END
 
 #### Unset array member
 a=(x y z)
 unset 'a[1]'
+echo status=$?
 echo "${a[@]}" len="${#a[@]}"
-## stdout: x z len=2
+## STDOUT:
+status=0
+x z len=2
+## END
 ## N-I dash status: 2
 ## N-I dash stdout-json: ""
+## OK zsh STDOUT:
+status=0
+ y z len=3
+## END
+## N-I osh STDOUT:
+status=2
+x y z len=3
+## END
 
 #### Unset array member with expression
 i=1
 a=(w x y z)
 unset 'a[ i - 1 ]' a[i+1]  # note: can't have space between a and [
+echo status=$?
 echo "${a[@]}" len="${#a[@]}"
-## stdout: x z len=2
+## STDOUT:
+status=0
+x z len=2
+## END
 ## N-I dash status: 2
 ## N-I dash stdout-json: ""
+## N-I zsh status: 1
+## N-I zsh stdout-json: ""
+## N-I osh STDOUT:
+status=2
+w x y z len=4
+## END
 
 #### Use local twice
 f() {
@@ -226,6 +421,10 @@ f() {
 }
 f
 ## stdout: bar
+## BUG zsh STDOUT:
+foo=bar
+bar
+## END
 
 #### Local without variable is still unset!
 set -o nounset
@@ -234,5 +433,35 @@ f() {
   echo "[$foo]"
 }
 f
+## stdout-json: ""
 ## status: 1
 ## OK dash status: 2
+# zsh doesn't support nounset?
+## BUG zsh stdout: []
+## BUG zsh status: 0
+
+#### local after readonly
+f() { 
+  readonly y
+  local x=1 y=$(( x ))
+  echo y=$y
+}
+f
+echo y=$y
+## status: 1
+## stdout-json: ""
+
+## OK dash status: 2
+
+## BUG mksh status: 0
+## BUG mksh STDOUT:
+y=0
+y=
+## END
+
+## BUG bash status: 0
+## BUG bash STDOUT:
+y=
+y=
+## END
+

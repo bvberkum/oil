@@ -6,43 +6,36 @@
 set -o nounset
 set -o pipefail
 set -o errexit
+shopt -s strict:all 2>/dev/null || true  # dogfood for OSH
 
 source test/common.sh
+source test/spec-common.sh
 
-export ASDL_TYPE_CHECK=1
-
-# For now, fall back to the shell in $PATH.
-shell-path() {
-  local name=$1
-  if test -f _tmp/spec-bin/$name; then
-    echo _tmp/spec-bin/$name
-  else
-    which $name
-  fi
-}
-
-readonly DASH=$(shell-path dash)
-readonly BASH=$(shell-path bash)
-readonly MKSH=$(shell-path mksh)
-readonly ZSH=$(shell-path zsh)
-
-if test -f _tmp/spec-bin/ash; then
-  readonly BUSYBOX_ASH=_tmp/spec-bin/ash
-else
-  readonly BUSYBOX_ASH=_tmp/shells/ash
+if test -z "${IN_NIX_SHELL:-}"; then
+  source build/dev-shell.sh  # to run 'dash', etc.
 fi
+
+readonly REPO_ROOT=$(cd $(dirname $0)/..; pwd)
+
+# TODO: Get rid of this indirection.
+readonly DASH=dash
+readonly BASH=bash
+readonly MKSH=mksh
+readonly ZSH=zsh
+readonly BUSYBOX_ASH=ash
 
 # Usage: callers can override OSH_LIST to test on more than one version.
 #
 # Example:
 # OSH_LIST='bin/osh _bin/osh' test/spec.sh all
 
-readonly OSH_CPYTHON='bin/osh'
-readonly OSH_OVM=${OSH_OVM:-_bin/osh}
+readonly OSH_CPYTHON="$REPO_ROOT/bin/osh"
+readonly OSH_OVM=${OSH_OVM:-$REPO_ROOT/_bin/osh}
 
 OSH_LIST=${OSH_LIST:-}  # A space-separated list.
 
 if test -z "$OSH_LIST"; then
+  # By default, run with both, unless $OSH_OVM isn't available.
   if test -e $OSH_OVM; then
     # TODO: Does it make sense to copy the binary to an unrelated to directory,
     # like /tmp?  /tmp/{oil.ovm,osh}.
@@ -52,6 +45,19 @@ if test -z "$OSH_LIST"; then
   fi
 fi
 
+readonly OIL_CPYTHON="$REPO_ROOT/bin/oil"
+readonly OIL_OVM=${OIL_OVM:-$REPO_ROOT/_bin/oil}
+
+OIL_LIST=${OIL_LIST:-}  # A space-separated list.
+
+if test -z "$OIL_LIST"; then
+  # By default, run with both, unless $OIL_OVM isn't available.
+  if test -e $OIL_OVM; then
+    OIL_LIST="$OIL_CPYTHON $OIL_OVM"
+  else
+    OIL_LIST="$OIL_CPYTHON"
+  fi
+fi
 
 # ash and dash are similar, so not including ash by default.  zsh is not quite
 # POSIX.
@@ -62,8 +68,8 @@ readonly REF_SHELLS=($DASH $BASH $MKSH)
 #
 
 link-busybox-ash() {
-  mkdir -p $(dirname $BUSYBOX_ASH)
-  ln -s -f --verbose "$(which busybox)" $BUSYBOX_ASH
+  mkdir -p _tmp/shells
+  ln -s -f --verbose "$(which busybox)" _tmp/shells/ash
 }
 
 # dash and bash should be there by default on Ubuntu.
@@ -72,11 +78,22 @@ install-shells() {
   link-busybox-ash
 }
 
-# TODO: Maybe do this before running all tests.
-check-shells() {
-  for sh in "${REF_SHELLS[@]}" $ZSH $OSH_LIST; do
-    test -e $sh || { echo "ERROR: $sh does not exist"; break; }
-    test -x $sh || { echo "ERROR: $sh isn't executable"; break; }
+check-shells-exist() {
+  # We need these shells to run OSH spec tests.
+
+  echo "PWD = $PWD"
+  echo "PATH = $PATH"
+  ls -l _tmp/shells || true
+
+  /bin/busybox ash -c 'echo "hello from /bin/busybox"'
+
+  for sh in "${REF_SHELLS[@]}" $ZSH $BUSYBOX_ASH $OSH_LIST; do
+
+    # note: shells are in $PATH, but not $OSH_LIST
+    if ! $sh -c 'echo -n "hello from $0: "; command -v $0 || true'; then 
+      echo "ERROR: $sh does not exist"
+      return 1
+    fi
   done
 }
 
@@ -89,7 +106,23 @@ maybe-show() {
   fi
 }
 
-version-text() {
+oil-version-text() {
+  date-and-git-info
+
+  for bin in $OIL_LIST; do
+    echo ---
+    echo "\$ $bin --version"
+    $bin --version
+    echo
+  done
+
+  maybe-show /etc/alpine-release
+  maybe-show /etc/debian_version
+  maybe-show /etc/lsb-release
+}
+
+# This has to be in test/spec because it uses $OSH_LIST, etc.
+osh-version-text() {
   date-and-git-info
 
   for bin in $OSH_LIST; do
@@ -99,20 +132,28 @@ version-text() {
     echo
   done
 
+  # e.g. when running test/spec-alpine.sh
+  if test -n "${SPEC_RUNNER:-}"; then
+    maybe-show /etc/alpine-release
+    return
+  fi
+
+  # $BASH and $ZSH should exist
+
   echo ---
-  $BASH --version | head -n 1
-  ls -l $BASH
+  bash --version | head -n 1
+  ls -l $(type -p bash)
   echo
 
   echo ---
-  $ZSH --version | head -n 1
-  ls -l $ZSH
+  zsh --version | head -n 1
+  ls -l $(type -p zsh)
   echo
 
   # No -v or -V or --version.  TODO: Only use hermetic version on release.
 
   echo ---
-  local my_dash=_tmp/spec-bin/dash
+  local my_dash=$(type -p dash)
   if test -f $my_dash; then
     ls -l $my_dash
   else
@@ -121,7 +162,7 @@ version-text() {
   echo
 
   echo ---
-  local my_mksh=_tmp/spec-bin/mksh
+  local my_mksh=$(type -p mksh)
   if test -f $my_mksh; then
     ls -l $my_mksh
   else
@@ -130,7 +171,7 @@ version-text() {
   echo
 
   echo ---
-  local my_busybox=_tmp/spec-bin/busybox-1.22.0/busybox
+  local my_busybox=_tmp/spec-bin/busybox-1.31.1/busybox
   if test -f $my_busybox; then
     { $my_busybox || true; } | head -n 1
     ls -l $my_busybox
@@ -144,28 +185,8 @@ version-text() {
   maybe-show /etc/lsb-release
 }
 
-#
-# Helpers
-#
-
-sh-spec() {
-  local test_file=$1
-  shift
-
-  if [[ $test_file != *.test.sh ]]; then
-    die "Test file should end with .test.sh"
-  fi
-
-  local this_dir=$(cd $(dirname $0) && pwd)
-
-  local tmp_env=$this_dir/../_tmp/spec-tmp/$(basename $test_file)
-  mkdir -p $tmp_env
-
-  test/sh_spec.py \
-      --tmp-env $tmp_env \
-      --path-env "$this_dir/../spec/bin:$PATH" \
-      "$test_file" \
-      "$@"
+osh-minimal-version-text() {
+  osh-version-text
 }
 
 #
@@ -182,7 +203,7 @@ trace-var-sub() {
 
   # This prints trace with line numbers to stdout.
   #python -m trace --trace -C $out \
-  python -m trace --trackcalls -C $out \
+  PYTHONPATH=. python -m trace --trackcalls -C $out \
     test/sh_spec.py spec/var-sub.test.sh $DASH $BASH "$@"
 
   ls -l $out
@@ -193,11 +214,43 @@ trace-var-sub() {
 # Run All tests
 #
 
-all() {
-  test/spec-runner.sh all-parallel "$@"
+osh-all() {
+  test/spec-runner.sh all-parallel osh "$@"
 }
 
-# Usgae: test/spec.sh dbg smoke, dbg-all
+oil-all() {
+  test/spec-runner.sh all-parallel oil "$@"
+}
+
+osh-minimal() {
+  check-shells-exist  # e.g. depends on link-busybox-ash
+
+  # oil-json: for testing yajl
+  cat >_tmp/spec/SUITE-osh-minimal.txt <<EOF
+smoke
+oil-json
+interactive
+EOF
+# this fails because the 'help' builtin doesn't have its data
+# builtin-bash
+
+  MAX_PROCS=1 test/spec-runner.sh all-parallel osh-minimal "$@"
+}
+
+osh-all-serial() {
+  MAX_PROCS=1 $0 osh-all "$@"
+}
+
+osh-travis() {
+  check-shells-exist  # e.g. depends on link-busybox-ash
+  osh-all-serial
+}
+
+oil-all-serial() {
+  MAX_PROCS=1 $0 oil-all "$@"
+}
+
+# Usage: test/spec.sh dbg smoke, dbg-all
 dbg() {
   OSH_LIST='_bin/osh-dbg' $0 "$@"
 }
@@ -208,14 +261,22 @@ dbg-all() {
 }
 
 #
-# Invidual tests.
+# Individual tests.
 #
 # We configure the shells they run on and the number of allowed failures (to
 # prevent regressions.)
 #
 
+oil-bin() {
+  sh-spec spec/oil-bin.test.sh $OIL_LIST "$@"
+}
+
 smoke() {
   sh-spec spec/smoke.test.sh ${REF_SHELLS[@]} $OSH_LIST "$@"
+}
+
+interactive() {
+  sh-spec spec/interactive.test.sh ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 prompt() {
@@ -231,7 +292,8 @@ osh-only() {
 
 # Regress bugs
 bugs() {
-  sh-spec spec/bugs.test.sh ${REF_SHELLS[@]} $OSH_LIST "$@"
+  sh-spec spec/bugs.test.sh \
+    ${REF_SHELLS[@]} $ZSH $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
 blog1() {
@@ -250,7 +312,7 @@ blog-other1() {
 }
 
 alias() {
-  sh-spec spec/alias.test.sh --osh-failures-allowed 6 \
+  sh-spec spec/alias.test.sh \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
@@ -259,7 +321,7 @@ comments() {
 }
 
 word-split() {
-  sh-spec spec/word-split.test.sh --osh-failures-allowed 2 \
+  sh-spec spec/word-split.test.sh --osh-failures-allowed 7 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -268,13 +330,32 @@ word-eval() {
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
+# These cases apply to many shells.
 assign() {
   sh-spec spec/assign.test.sh --osh-failures-allowed 2 \
-    ${REF_SHELLS[@]} $OSH_LIST "$@" 
+    ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@" 
+}
+
+# These cases apply to a few shells.
+assign-extended() {
+  sh-spec spec/assign-extended.test.sh \
+    $BASH $MKSH $OSH_LIST "$@" 
+}
+
+# Corner cases that OSH doesn't handle
+assign-deferred() {
+  sh-spec spec/assign-deferred.test.sh \
+    $BASH $MKSH "$@" 
+}
+
+# These test associative arrays
+assign-dialects() {
+  sh-spec spec/assign-dialects.test.sh --osh-failures-allowed 1 \
+    $BASH $MKSH $OSH_LIST "$@" 
 }
 
 background() {
-  sh-spec spec/background.test.sh \
+  sh-spec spec/background.test.sh --osh-failures-allowed 2 \
     ${REF_SHELLS[@]} $OSH_LIST "$@" 
 }
 
@@ -289,27 +370,27 @@ quote() {
 }
 
 loop() {
-  sh-spec spec/loop.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/loop.test.sh --no-cd-tmp \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
 case_() {
-  sh-spec spec/case_.test.sh --osh-failures-allowed 2 \
+  sh-spec spec/case_.test.sh --osh-failures-allowed 3 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 if_() {
-  sh-spec spec/if_.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/if_.test.sh \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
 builtins() {
-  sh-spec spec/builtins.test.sh --osh-failures-allowed 1 \
-    ${REF_SHELLS[@]} $OSH_LIST "$@"
+  sh-spec spec/builtins.test.sh --no-cd-tmp --osh-failures-allowed 1 \
+    ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
 builtin-eval-source() {
-  sh-spec spec/builtin-eval-source.test.sh \
+  sh-spec spec/builtin-eval-source.test.sh --no-cd-tmp --osh-failures-allowed 1 \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
@@ -318,9 +399,10 @@ builtin-io() {
     ${REF_SHELLS[@]} $ZSH $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
+# Special bash printf things like -v and %q.  Portable stuff goes in builtin-io.
 builtin-printf() {
-  sh-spec spec/builtin-printf.test.sh --osh-failures-allowed 4 \
-    $BASH $OSH_LIST "$@"
+  sh-spec spec/builtin-printf.test.sh --osh-failures-allowed 1 \
+    ${REF_SHELLS[@]} $ZSH $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
 builtins2() {
@@ -329,26 +411,27 @@ builtins2() {
 
 # dash and mksh don't implement 'dirs'
 builtin-dirs() {
-  sh-spec spec/builtin-dirs.test.sh $BASH $ZSH $OSH_LIST "$@"
+  sh-spec spec/builtin-dirs.test.sh \
+    $BASH $ZSH $OSH_LIST "$@"
 }
 
 builtin-vars() {
-  sh-spec spec/builtin-vars.test.sh --osh-failures-allowed 2 \
-    ${REF_SHELLS[@]} $OSH_LIST "$@"
+  sh-spec spec/builtin-vars.test.sh --osh-failures-allowed 1 \
+    ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
 builtin-getopts() {
-  sh-spec spec/builtin-getopts.test.sh \
+  sh-spec spec/builtin-getopts.test.sh --osh-failures-allowed 1 \
     ${REF_SHELLS[@]} $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
 builtin-bracket() {
-  sh-spec spec/builtin-bracket.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/builtin-bracket.test.sh --no-cd-tmp \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 builtin-trap() {
-  sh-spec spec/builtin-trap.test.sh --osh-failures-allowed 3 \
+  sh-spec spec/builtin-trap.test.sh --no-cd-tmp --osh-failures-allowed 4 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -360,13 +443,18 @@ builtin-bash() {
 
 # This is bash/OSH only
 builtin-completion() {
-  sh-spec spec/builtin-completion.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/builtin-completion.test.sh \
+    --no-cd-tmp --osh-failures-allowed 1 \
     $BASH $OSH_LIST "$@"
 }
 
-builtins-special() {
-  sh-spec spec/builtins-special.test.sh --osh-failures-allowed 3 \
-    ${REF_SHELLS[@]} $OSH_LIST "$@"
+builtin-special() {
+  sh-spec spec/builtin-special.test.sh --osh-failures-allowed 4 \
+    ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
+}
+
+builtin-times() {
+  sh-spec spec/builtin-times.test.sh $BASH $ZSH $OSH_LIST "$@"
 }
 
 command-parsing() {
@@ -377,32 +465,34 @@ func-parsing() {
   sh-spec spec/func-parsing.test.sh ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
-func() {
-  sh-spec spec/func.test.sh \
+sh-func() {
+  sh-spec spec/sh-func.test.sh \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 glob() {
-  sh-spec spec/glob.test.sh --osh-failures-allowed 4 \
+  # Note: can't pass because it assumes 'bin' exists, etc.
+  sh-spec spec/glob.test.sh --no-cd-tmp --osh-failures-allowed 7 \
     ${REF_SHELLS[@]} $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
 arith() {
-  sh-spec spec/arith.test.sh --osh-failures-allowed 2 \
+  sh-spec spec/arith.test.sh --osh-failures-allowed 4 \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
 command-sub() {
-  sh-spec spec/command-sub.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/command-sub.test.sh \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 command_() {
-  sh-spec spec/command_.test.sh ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
+  sh-spec spec/command_.test.sh \
+    ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
 pipeline() {
-  sh-spec spec/pipeline.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/pipeline.test.sh \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
@@ -412,7 +502,8 @@ explore-parsing() {
 }
 
 parse-errors() {
-  sh-spec spec/parse-errors.test.sh ${REF_SHELLS[@]} $OSH_LIST "$@"
+  sh-spec spec/parse-errors.test.sh --osh-failures-allowed 3 \
+    ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 here-doc() {
@@ -427,7 +518,7 @@ here-doc() {
 }
 
 redirect() {
-  sh-spec spec/redirect.test.sh --osh-failures-allowed 4 \
+  sh-spec spec/redirect.test.sh --osh-failures-allowed 5 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -438,12 +529,11 @@ posix() {
 
 special-vars() {
   sh-spec spec/special-vars.test.sh --osh-failures-allowed 4 \
-    ${REF_SHELLS[@]} $OSH_LIST "$@"
+    ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
-# dash/mksh don't implement this.
 introspect() {
-  sh-spec spec/introspect.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/introspect.test.sh --no-cd-tmp \
     $BASH $OSH_LIST "$@"
 }
 
@@ -453,18 +543,35 @@ tilde() {
 }
 
 var-op-test() {
-  sh-spec spec/var-op-test.test.sh --osh-failures-allowed 5 \
+  sh-spec spec/var-op-test.test.sh \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
-var-op-other() {
-  sh-spec spec/var-op-other.test.sh --osh-failures-allowed 2 \
+var-op-len() {
+  sh-spec spec/var-op-len.test.sh --no-cd-tmp \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
+var-op-patsub() {
+  # 1 unicode failure
+  sh-spec spec/var-op-patsub.test.sh --osh-failures-allowed 1 \
+    $BASH $MKSH $ZSH $OSH_LIST "$@"
+}
+
+var-op-slice() {
+  # dash doesn't support any of these operations
+  sh-spec spec/var-op-slice.test.sh --osh-failures-allowed 0 \
+    $BASH $MKSH $ZSH $OSH_LIST "$@"
+}
+
+var-op-bash() {
+  sh-spec spec/var-op-bash.test.sh --osh-failures-allowed 2 \
+    $BASH $OSH_LIST "$@"
+}
+
 var-op-strip() {
-  sh-spec spec/var-op-strip.test.sh --osh-failures-allowed 1 \
-    ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
+  sh-spec spec/var-op-strip.test.sh \
+    ${REF_SHELLS[@]} $ZSH $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
 var-sub() {
@@ -480,12 +587,17 @@ var-num() {
 }
 
 var-sub-quote() {
-  sh-spec spec/var-sub-quote.test.sh \
+  sh-spec spec/var-sub-quote.test.sh --osh-failures-allowed 2 \
+    ${REF_SHELLS[@]} $OSH_LIST "$@"
+}
+
+sh-usage() {
+  sh-spec spec/sh-usage.test.sh \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
 sh-options() {
-  sh-spec spec/sh-options.test.sh --osh-failures-allowed 5 \
+  sh-spec spec/sh-options.test.sh --osh-failures-allowed 2 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -495,7 +607,12 @@ xtrace() {
 }
 
 strict-options() {
-  sh-spec spec/strict-options.test.sh \
+  sh-spec spec/strict-options.test.sh --no-cd-tmp \
+    ${REF_SHELLS[@]} $OSH_LIST "$@"
+}
+
+exit-status() {
+  sh-spec spec/exit-status.test.sh --osh-failures-allowed 1 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -504,8 +621,8 @@ errexit() {
     ${REF_SHELLS[@]} $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
-errexit-strict() {
-  sh-spec spec/errexit-strict.test.sh \
+errexit-oil() {
+  sh-spec spec/errexit-oil.test.sh --no-cd-tmp \
     ${REF_SHELLS[@]} $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
@@ -515,17 +632,17 @@ errexit-strict() {
 
 # There as many non-POSIX arithmetic contexts.
 arith-context() {
-  sh-spec spec/arith-context.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/arith-context.test.sh \
     $BASH $MKSH $ZSH $OSH_LIST "$@"
 }
 
 array() {
-  sh-spec spec/array.test.sh --osh-failures-allowed 3 \
+  sh-spec spec/array.test.sh \
     $BASH $MKSH $OSH_LIST "$@"
 }
 
 array-compat() {
-  sh-spec spec/array-compat.test.sh --osh-failures-allowed 4 \
+  sh-spec spec/array-compat.test.sh \
     $BASH $MKSH $OSH_LIST "$@"
 }
 
@@ -535,13 +652,13 @@ type-compat() {
 
 # += is not POSIX and not in dash.
 append() {
-  sh-spec spec/append.test.sh --osh-failures-allowed 2 \
+  sh-spec spec/append.test.sh \
     $BASH $MKSH $OSH_LIST "$@" 
 }
 
 # associative array -- mksh and zsh implement different associative arrays.
 assoc() {
-  sh-spec spec/assoc.test.sh --osh-failures-allowed 11 \
+  sh-spec spec/assoc.test.sh --osh-failures-allowed 1 \
     $BASH $OSH_LIST "$@"
 }
 
@@ -564,13 +681,12 @@ dparen() {
 }
 
 brace-expansion() {
-  # TODO for osh: implement num ranges, mark char ranges unimplemented?
-  sh-spec spec/brace-expansion.test.sh --osh-failures-allowed 12 \
+  sh-spec spec/brace-expansion.test.sh \
     $BASH $MKSH $ZSH $OSH_LIST "$@"
 }
 
 regex() {
-  sh-spec spec/regex.test.sh --osh-failures-allowed 3 \
+  sh-spec spec/regex.test.sh --osh-failures-allowed 2 \
     $BASH $ZSH $OSH_LIST "$@"
 }
 
@@ -589,20 +705,21 @@ extended-glob() {
 
 # This does string matching.
 extglob-match() {
-  sh-spec spec/extglob-match.test.sh $BASH $MKSH $OSH_LIST "$@"
+  sh-spec spec/extglob-match.test.sh \
+    $BASH $MKSH $OSH_LIST "$@"
 }
 
 # ${!var} syntax -- oil should replace this with associative arrays.
 # mksh has completely different behavior for this syntax.  Not worth testing.
 var-ref() {
-  sh-spec spec/var-ref.test.sh --osh-failures-allowed 6 \
+  sh-spec spec/var-ref.test.sh --osh-failures-allowed 3 \
     $BASH $OSH_LIST "$@"
 }
 
-# local -n
-# mksh appears to implement this.
-named-ref() {
-  sh-spec spec/named-ref.test.sh --osh-failures-allowed 3 \
+# declare / local -n
+# there is one divergence when combining -n and ${!ref}
+nameref() {
+  sh-spec spec/nameref.test.sh --osh-failures-allowed 3 \
     $BASH $MKSH $OSH_LIST "$@"
 }
 
@@ -623,6 +740,187 @@ empty-bodies() {
 # osh has infinite loop?
 shell-grammar() {
   sh-spec spec/shell-grammar.test.sh $BASH $MKSH $ZSH "$@"
+}
+
+#
+# Smoosh
+#
+
+readonly SMOOSH_REPO=~/git/languages/smoosh
+
+sh-spec-smoosh-env() {
+  local test_file=$1
+  shift
+
+  # - smoosh tests use $TEST_SHELL instead of $SH
+  # - cd $TMP to avoid littering repo
+  # - pass -o posix
+  # - timeout of 1 second
+  # - Some tests in smoosh use $HOME and $LOGNAME
+
+  sh-spec $test_file \
+    --sh-env-var-name TEST_SHELL \
+    --posix \
+    --rm-tmp \
+    --env-pair "TEST_UTIL=$SMOOSH_REPO/tests/util" \
+    --env-pair "LOGNAME=$LOGNAME" \
+    --env-pair "HOME=$HOME" \
+    --timeout 1 \
+    "$@"
+}
+
+# For speed, only run with one copy of OSH.
+readonly smoosh_osh_list=$OSH_CPYTHON
+
+smoosh() {
+  ### Run case smoosh from the console
+
+  sh-spec-smoosh-env _tmp/smoosh.test.sh \
+    ${REF_SHELLS[@]} $smoosh_osh_list "$@"
+}
+
+smoosh-hang() {
+  ### Run case smoosh-hang from the console
+
+  # Need the smoosh timeout tool to run correctly.
+  sh-spec-smoosh-env _tmp/smoosh-hang.test.sh \
+    --timeout-bin "$SMOOSH_REPO/tests/util/timeout" \
+    --timeout 1 \
+    ${REF_SHELLS[@]} $smoosh_osh_list "$@"
+}
+
+_one-html() {
+  local spec_name=$1
+  shift
+
+  test/spec-runner.sh _test-to-html _tmp/${spec_name}.test.sh \
+    > _tmp/spec/${spec_name}.test.html
+
+  local out=_tmp/spec/${spec_name}.html
+  set +o errexit
+  time $spec_name --format html --trace "$@" > $out
+  set -o errexit
+
+  echo
+  echo "Wrote $out"
+
+  # NOTE: This IGNORES the exit status.
+}
+
+smoosh-html() {
+  _one-html smoosh
+}
+
+smoosh-hang-html() {
+  _one-html smoosh-hang
+}
+
+html-demo() {
+  ### Test for --format html
+
+  local out=_tmp/spec/demo.html
+  builtin-special --format html "$@" > $out
+
+  echo
+  echo "Wrote $out"
+}
+
+all-and-smoosh() {
+  ### Run everything that we can publish
+
+  osh-all
+  oil-all
+
+  # These aren't all green/yellow yet, and are slow.
+  smoosh-html
+  smoosh-hang-html
+}
+
+#
+# Oil Language
+#
+
+oil-array() {
+  sh-spec spec/oil-array.test.sh --osh-failures-allowed 1 \
+    $OSH_LIST "$@"
+}
+
+oil-assign() {
+  sh-spec spec/oil-assign.test.sh --osh-failures-allowed 1 \
+    $OSH_LIST "$@"
+}
+
+oil-blocks() {
+  sh-spec spec/oil-blocks.test.sh \
+    $OSH_LIST "$@"
+}
+
+oil-builtins() {
+  sh-spec spec/oil-builtins.test.sh \
+    $OSH_LIST "$@"
+}
+
+oil-json() {
+  sh-spec spec/oil-json.test.sh --osh-failures-allowed 0 \
+    $OSH_LIST "$@"
+}
+
+oil-options() {
+  sh-spec spec/oil-options.test.sh --osh-failures-allowed 2 \
+    $OSH_LIST "$@"
+}
+
+oil-expr() {
+  sh-spec spec/oil-expr.test.sh --osh-failures-allowed 5 \
+    $OSH_LIST "$@"
+}
+
+oil-expr-sub() {
+  sh-spec spec/oil-expr-sub.test.sh --osh-failures-allowed 0 \
+    $OIL_LIST "$@"
+}
+
+oil-slice-range() {
+  sh-spec spec/oil-slice-range.test.sh --osh-failures-allowed 1 \
+    $OSH_LIST "$@"
+}
+
+oil-regex() {
+  sh-spec spec/oil-regex.test.sh --osh-failures-allowed 2 \
+    $OSH_LIST "$@"
+}
+
+oil-func-proc() {
+  sh-spec spec/oil-func-proc.test.sh --osh-failures-allowed 0 \
+    $OSH_LIST "$@"
+}
+
+oil-builtin-funcs() {
+  sh-spec spec/oil-builtin-funcs.test.sh --osh-failures-allowed 2 \
+    $OIL_LIST "$@"
+}
+
+oil-demo() {
+  # Using OSH for minimalism
+  sh-spec spec/oil-demo.test.sh --osh-failures-allowed 0 \
+    $OSH_LIST "$@"
+}
+
+# Use bin/oil
+
+oil-keywords() {
+  sh-spec spec/oil-keywords.test.sh --osh-failures-allowed 0 \
+    $OIL_LIST "$@"
+}
+
+oil-tuple() {
+  sh-spec spec/oil-tuple.test.sh --osh-failures-allowed 1 \
+    $OIL_LIST "$@"
+}
+
+oil-interactive() {
+  sh-spec spec/oil-interactive.test.sh --osh-failures-allowed 0 \
+    $OIL_LIST "$@"
 }
 
 "$@"

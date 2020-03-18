@@ -134,10 +134,8 @@ i=0
 echo done
 ## stdout-json: ""
 ## status: 1
-## N-I dash status: 127
-## N-I dash stdout-json: ""
-## BUG ash status: 0
-## BUG ash stdout: done
+## N-I dash/ash status: 127
+## N-I dash/ash stdout-json: ""
 
 #### errexit with subshell
 set -o errexit
@@ -146,34 +144,43 @@ echo three
 ## status: 1
 ## STDOUT:
 one
-## BUG ash status: 0
-## BUG ash STDOUT:
-one
-three
 ## END
 
-#### setting errexit while it's being ignored
-# ignored and then set again
+#### set -o errexit while it's being ignored (moot with strict_errexit)
 set -o errexit
 # osh aborts early here
 if { echo 1; false; echo 2; set -o errexit; echo 3; false; echo 4; }; then
   echo 5;
 fi
 echo 6
-false  # this is the one that makes other shells fail
+false  # this is the one that makes shells fail
 echo 7
 ## status: 1
 ## STDOUT:
-1
-2
-## END
-## OK dash/bash/mksh/ash STDOUT:
 1
 2
 3
 4
 5
 6
+## END
+
+#### set +o errexit while it's being ignored (moot with strict_errexit)
+set -o errexit
+if { echo 1; false; echo 2; set +o errexit; echo 3; false; echo 4; }; then
+  echo 5;
+fi
+echo 6
+false  # does NOT fail, because we restored it.
+echo 7
+## STDOUT:
+1
+2
+3
+4
+5
+6
+7
 ## END
 
 #### setting errexit in a subshell works but doesn't affect parent shell
@@ -189,7 +196,7 @@ echo 6
 6
 ## END
 
-#### setting errexit while it's being ignored in a subshell
+#### set errexit while it's ignored in a subshell (moot with strict_errexit)
 set -o errexit
 if ( echo 1; false; echo 2; set -o errexit; echo 3; false; echo 4 ); then
   echo 5;
@@ -201,14 +208,21 @@ echo 7
 ## STDOUT:
 1
 2
-6
-## OK dash/bash/mksh/ash STDOUT:
-1
-2
 3
 4
 5
 6
+## END
+
+#### shopt -s strict:all || true while errexit is on
+set -o errexit
+shopt -s strict:all || true
+echo one
+false  # fail
+echo two
+## status: 1
+## STDOUT:
+one
 ## END
 
 #### errexit double guard

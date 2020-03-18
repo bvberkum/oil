@@ -1,0 +1,35 @@
+/*
+ * For toc.js -- also taken from asciidoc.
+ */
+
+div#toc {
+  margin-top: 2em;
+  background-color: oldlace;
+  padding: 1em;
+}
+
+div#toc a {
+  text-decoration: none;
+}
+
+#toctitle {
+  text-align: center;
+  color: #666;
+  font-weight: bold;
+  margin-bottom: 0.2em;
+/*
+*/
+}
+
+div.toclevel1, div.toclevel2, div.toclevel3, div.toclevel4 {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+div.toclevel1 {
+  margin-left: 2em;
+  font-size: 0.9em;
+}
+div.toclevel2 {
+  margin-left: 4em;
+  font-size: 0.9em;
+}

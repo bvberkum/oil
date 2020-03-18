@@ -1,33 +1,37 @@
 -- Types that don't depend on Id.  (To break dependency)
 
 module types {
-  -- Also invalid because of duplicate 'Path' -- to fix
   bool_arg_type = Undefined | Path | Int | Str | Other
   redir_arg_type = Path | Desc | Here
 
-  -- Fifteen lexer modes for osh.
-  -- Possible additional modes:
-  --   nested backticks: echo `echo \`echo foo\` bar`
+  -- Fifteen lexer modes for OSH
+
   lex_mode =
     Undefined
   | Comment
-  | Outer
+  | ShCommand
+  | Backtick  -- preprocessing before Outer
   | DBracket
-  | SQ | DQ | DollarSQ
+  | SQ_Raw | DQ | SQ_C
   | Arith
   | ExtGlob
-  | VS_1 | VS_2 | VS_ArgUnquoted | VS_ArgDQ
+  | VSub_1 | VSub_2 | VSub_ArgUnquoted | VSub_ArgDQ
   | BashRegex | BashRegexChars
 
-  | OilOuter    -- echo foo (should this be OIL_COMMAND?)
-  | OilWords -- Like OUTER, but {a,b} and [a-z].? are recognized.
-  | OilExpr -- echo ${a * b} $(a * b)
-  | OilSQ -- echo '_\t_'
-  | OilDQ -- echo "hello $name\n"
-  | OilRawSQ  -- echo r'foo'
-  | OilRawDQ  -- echo r"hello there"
+  -- Two for printf builtin
 
-  -- More:
-  -- * Multiline strings
-  -- * Bitwise expressions for set x = bits ~a | b ?
+  | PrintfOuter | PrintfPercent
+
+  -- Oil language has 4 main modes, 2 for regexes, and 4 kinds of strings
+  -- (or maybe 6 with multiline?  Not sure if that's handled in the lexer.)
+
+  | Expr      -- var x = 1 + 2 * 3; echo $f(a, b + 1)
+
+  -- TODO:
+  -- * Multiline strings.  May require some parsing too.
+  -- * Tagged strings.  Are these raw by default?
+
+  -- More possibilities
+  -- * printf formatting ${x %05d}.  I think that is mostly in expression mode
+  --   like ${x|html} or ${x|title}
 }

@@ -503,6 +503,9 @@ move_unreachable(PyGC_Head *young, PyGC_Head *unreachable)
 static int
 has_finalizer(PyObject *op)
 {
+#ifdef OBJECTS_ONLY
+    assert(0);
+#else
     if (PyInstance_Check(op)) {
         assert(delstr != NULL);
         return _PyInstance_Lookup(op, delstr) != NULL;
@@ -513,6 +516,7 @@ has_finalizer(PyObject *op)
         return PyGen_NeedsFinalizing((PyGenObject *)op);
     else
         return 0;
+#endif
 }
 
 /* Try to untrack all currently tracked dictionaries */
@@ -837,6 +841,8 @@ delete_garbage(PyGC_Head *collectable, PyGC_Head *old)
 static void
 clear_freelists(void)
 {
+    /* Don't free anything; we want to use our own per-proc allocator! */
+#ifndef OBJECTS_ONLY
     (void)PyMethod_ClearFreeList();
     (void)PyFrame_ClearFreeList();
     (void)PyCFunction_ClearFreeList();
@@ -846,6 +852,7 @@ clear_freelists(void)
 #endif
     (void)PyInt_ClearFreeList();
     (void)PyFloat_ClearFreeList();
+#endif
 }
 
 static double
@@ -1386,6 +1393,7 @@ static PyMethodDef GcMethods[] = {
 };
 #endif
 
+#ifndef OBJECTS_ONLY
 PyMODINIT_FUNC
 initgc(void)
 {
@@ -1430,6 +1438,7 @@ initgc(void)
     ADD_INT(DEBUG_LEAK);
 #undef ADD_INT
 }
+#endif
 
 /* API to invoke gc.collect() from C */
 Py_ssize_t
@@ -1506,6 +1515,13 @@ _PyObject_GC_Malloc(size_t basicsize)
         return PyErr_NoMemory();
     g->gc.gc_refs = GC_UNTRACKED;
     generations[0].count++; /* number of allocated GC objects */
+#ifndef OBJECTS_ONLY
+    /* TODO: We need to allocate in an arena
+     * We could just call PyObject_MALLOC directly, since there's no
+     * distinction between GC objects and non-GC.
+     * The PyObject_MALLOC macro expands to PyMem_MALLOC, which expands to
+     * malloc().
+     * */
     if (generations[0].count > generations[0].threshold &&
         enabled &&
         generations[0].threshold &&
@@ -1515,6 +1531,7 @@ _PyObject_GC_Malloc(size_t basicsize)
         collect_generations();
         collecting = 0;
     }
+#endif
     op = FROM_GC(g);
     return op;
 }

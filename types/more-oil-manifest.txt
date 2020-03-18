@@ -1,0 +1,16 @@
+./osh/glob_.py
+./osh/string_ops.py
+./frontend/location.py
+./osh/history.py
+./core/comp_ui.py
+./frontend/py_reader.py
+./core/error.py
+./osh/word_compile.py
+./osh/builtin_bracket.py
+./core/main_loop.py
+./oil_lang/regex_translate.py
+./oil_lang/objects.py
+./osh/cmd_exec.py
+./osh/word_eval.py
+./core/vm.py
+./frontend/builtin_def.py

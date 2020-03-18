@@ -1,0 +1,98 @@
+# Grammar for find
+
+# TODO: Could we encode numeric arguments into the grammar?
+# find apparently supports n +n -n.
+# #
+# Separately parsed:
+# - printf format string
+# - perm mode string
+# - regex and glob (passed through to libc, most likely)
+
+start: concatenation ENDMARKER
+
+concatenation: disjunction (',' disjunction)*
+
+disjunction: conjunction ('-o' conjunction)*
+
+# implicit and is allowed
+conjunction: negation (['-a'] negation)*
+
+negation: ['!'] group
+
+group: '(' concatenation ')' | expr
+
+expr: (
+# atoms
+  '-true'
+| '-false'
+
+# paths
+| '-name' STRING
+| '-iname' STRING
+
+| '-lname' STRING
+| '-ilname' STRING
+
+| '-path' STRING
+| '-ipath' STRING
+
+| '-regex' STRING
+| '-iregex' STRING
+
+| '-readable'
+| '-writable'
+| '-executable'
+
+# stat
+| '-empty'
+
+| '-size' STRING
+| '-type' STRING
+| '-xtype' STRING
+| '-perm' STRING
+
+| '-group' STRING
+| '-user' STRING
+| '-gid' STRING
+| '-uid' STRING
+| '-nogroup'
+| '-nouser'
+
+#   for time (TODO)
+| '-amin' STRING
+| '-anewer' STRING
+| '-atime' STRING
+
+| '-cmin' STRING
+| '-cnewer' STRING
+| '-ctime' STRING
+
+| '-mmin' STRING
+| '-newer' STRING  # note -newer not -mnewer
+| '-mtime' STRING
+| '-newerXY' STRING
+
+# actions
+| '-delete'
+| '-prune'
+| '-quit'
+
+| '-print'
+| '-print0'
+| '-printf' STRING
+| '-ls'
+
+| '-fprint' STRING
+| '-fprint0' STRING
+| '-fprintf' STRING STRING
+| '-fls' STRING
+
+  # TODO: can the command be empty?
+  # parse {}?  That is replaced with the current filename.
+| '-exec' STRING* terminator
+| '-execdir' STRING* terminator
+| '-ok' STRING* terminator
+| '-okdir' STRING* terminator
+)
+
+terminator: ';' | '+'

@@ -1,4 +1,3 @@
-#!/usr/bin/python
 """
 front_end.py: Lexer and parser for the ASDL schema language.
 """
@@ -7,19 +6,44 @@ from __future__ import print_function
 import re
 
 from asdl import asdl_ as asdl
-from asdl import runtime
-from asdl.asdl_ import Module, Type, Constructor, Field, Sum, Product
+from asdl import meta
+from asdl.asdl_ import Use, Module, Type, Constructor, Field, Sum, Product
+
+_KEYWORDS = ['use', 'module', 'attributes']
+
+_TOKENS = [
+    ('Keyword', ''),
+    ('Name', ''),
+
+    # For operators, the string matters
+    ('Equals', '='),
+    ('Comma', ','),
+    ('Question', '?'),
+    ('Pipe', '|'),
+    ('Asterisk', '*'),
+    ('LParen', '('),
+    ('RParen', ')'),
+    ('LBrace', '{'),
+    ('RBrace', '}'),
+    ('Percent', '%'),
+]
+
+_TOKEN_STR = [name for name, _ in _TOKENS]  # integer -> string like LParen
+_TOKEN_INT = {}  # string like '(' -> integer
 
 
-# Types for describing tokens in an ASDL specification.
 class TokenKind(object):
-    """TokenKind is provides a scope for enumerated token kinds."""
-    (ConstructorId, TypeId, Equals, Comma, Question, Pipe, Asterisk,
-     LParen, RParen, LBrace, RBrace) = xrange(11)
+    """ASDL tokens.
 
-    operator_table = {
-        '=': Equals, ',': Comma,    '?': Question, '|': Pipe,    '(': LParen,
-        ')': RParen, '*': Asterisk, '{': LBrace,   '}': RBrace}
+    TokenKind.LBrace = 5, etc.
+    """
+    pass
+
+
+for i, (name, val) in enumerate(_TOKENS):
+    setattr(TokenKind, name, i)
+    _TOKEN_INT[val] = i
+
 
 class Token(object):
     def __init__(self, kind, value, lineno):
@@ -40,19 +64,17 @@ def _Tokenize(f):
     for lineno, line in enumerate(f, 1):
         for m in re.finditer(r'\s*(\w+|--.*|.)', line.strip()):
             c = m.group(1)
-            if c[0].isalpha():
-                # Some kind of identifier
-                if c[0].isupper():
-                    yield Token(TokenKind.ConstructorId, c, lineno)
-                else:
-                    yield Token(TokenKind.TypeId, c, lineno)
+            if c in _KEYWORDS:
+                yield Token(TokenKind.Keyword, c, lineno)
+            elif c[0].isalpha():
+                yield Token(TokenKind.Name, c, lineno)
             elif c[:2] == '--':
                 # Comment
                 break
             else:
                 # Operators
                 try:
-                    op_kind = TokenKind.operator_table[c]
+                    op_kind = _TOKEN_INT[c]
                 except KeyError:
                     raise ASDLSyntaxError('Invalid operator %s' % c, lineno)
                 yield Token(op_kind, c, lineno)
@@ -76,41 +98,82 @@ class ASDLParser(object):
         return self._parse_module()
 
     def _parse_module(self):
-        if self._at_keyword('module'):
-            self._advance()
-        else:
+        """
+        module = 'module' NAME '{' use* type* '}'
+        """
+        if not self._at_keyword('module'):
             raise ASDLSyntaxError(
                 'Expected "module" (found {})'.format(self.cur_token.value),
                 self.cur_token.lineno)
-        name = self._match(self._id_kinds)
+        self._advance()
+        name = self._match(TokenKind.Name)
         self._match(TokenKind.LBrace)
-        defs = self._parse_definitions()
-        self._match(TokenKind.RBrace)
-        return Module(name, defs)
 
-    def _parse_definitions(self):
+        uses = []
+        while self._at_keyword('use'):
+            uses.append(self._parse_use())
+
         defs = []
-        while self.cur_token.kind == TokenKind.TypeId:
+        while self.cur_token.kind == TokenKind.Name:
             typename = self._advance()
             self._match(TokenKind.Equals)
-            type = self._parse_type()
-            defs.append(Type(typename, type))
-        return defs
+            type_ = self._parse_type()
+            defs.append(Type(typename, type_))
+
+        self._match(TokenKind.RBrace)
+        return Module(name, uses, defs)
+
+    def _parse_use(self):
+        """
+        use = 'use' NAME '{' NAME+ '}'
+        """
+        self._advance()
+        mod_name = self._match(TokenKind.Name)
+        self._match(TokenKind.LBrace)
+
+        type_names = []
+        while self.cur_token.kind == TokenKind.Name:
+            t = self._advance()
+            type_names.append(t)
+            if self.cur_token.kind == TokenKind.RParen:
+                break
+            elif self.cur_token.kind == TokenKind.Comma:
+                self._advance()
+
+        self._match(TokenKind.RBrace)
+        return Use(mod_name, type_names)
 
     def _parse_type(self):
+        """
+        constructor: Name fields?
+        sum: constructor ('|' constructor)*
+        type: product | sum
+        """
         if self.cur_token.kind == TokenKind.LParen:
             # If we see a (, it's a product
             return self._parse_product()
         else:
             # Otherwise it's a sum. Look for ConstructorId
-            sumlist = [Constructor(self._match(TokenKind.ConstructorId),
-                                   self._parse_optional_fields())]
-            while self.cur_token.kind == TokenKind.Pipe:
-                # More constructors
+            sumlist = []
+            while True:
+                cons_name = self._match(TokenKind.Name)
+
+                shared_type = None
+                fields = None
+                if self.cur_token.kind == TokenKind.LParen:
+                    fields = self._parse_fields()
+                elif self.cur_token.kind == TokenKind.Percent:
+                    self._advance()
+                    shared_type = self._match(TokenKind.Name)
+                else:
+                    pass
+
+                cons = Constructor(cons_name, shared_type, fields)
+                sumlist.append(cons)
+
+                if self.cur_token.kind != TokenKind.Pipe:
+                  break
                 self._advance()
-                sumlist.append(Constructor(
-                                self._match(TokenKind.ConstructorId),
-                                self._parse_optional_fields()))
             return Sum(sumlist, self._parse_optional_attributes())
 
     def _parse_product(self):
@@ -119,24 +182,20 @@ class ASDLParser(object):
     def _parse_fields(self):
         fields = []
         self._match(TokenKind.LParen)
-        while self.cur_token.kind == TokenKind.TypeId:
+        while self.cur_token.kind == TokenKind.Name:
             typename = self._advance()
             is_seq, is_opt = self._parse_optional_field_quantifier()
-            id = (self._advance() if self.cur_token.kind in self._id_kinds
-                                  else None)
-            fields.append(Field(typename, id, seq=is_seq, opt=is_opt))
+            if self.cur_token.kind == TokenKind.Name:
+                id_ = self._advance()
+            else:
+                id_ = None
+            fields.append(Field(typename, id_, seq=is_seq, opt=is_opt))
             if self.cur_token.kind == TokenKind.RParen:
                 break
             elif self.cur_token.kind == TokenKind.Comma:
                 self._advance()
         self._match(TokenKind.RParen)
         return fields
-
-    def _parse_optional_fields(self):
-        if self.cur_token.kind == TokenKind.LParen:
-            return self._parse_fields()
-        else:
-            return None
 
     def _parse_optional_attributes(self):
         if self._at_keyword('attributes'):
@@ -166,8 +225,6 @@ class ASDLParser(object):
             self.cur_token = None
         return cur_val
 
-    _id_kinds = (TokenKind.ConstructorId, TokenKind.TypeId)
-
     def _match(self, kind):
         """The 'match' primitive of RD parsers.
 
@@ -175,20 +232,22 @@ class ASDLParser(object):
           be a tuple, in which the kind must match one of its members).
         * Returns the value of the current token
         * Reads in the next token
+
+        Args:
+          kind: A TokenKind, or a tuple of TokenKind
         """
-        if (isinstance(kind, tuple) and self.cur_token.kind in kind or
-            self.cur_token.kind == kind
-            ):
+        if self.cur_token.kind == kind:
             value = self.cur_token.value
             self._advance()
             return value
         else:
             raise ASDLSyntaxError(
-                'Unmatched {} (found {})'.format(kind, self.cur_token.kind),
+                'Expected token {}, got {}'.format(_TOKEN_STR[kind],
+                                                   self.cur_token.value),
                 self.cur_token.lineno)
 
     def _at_keyword(self, keyword):
-        return (self.cur_token.kind == TokenKind.TypeId and
+        return (self.cur_token.kind == TokenKind.Keyword and
                 self.cur_token.value == keyword)
 
 
@@ -264,10 +323,10 @@ def _AppendFields(field_ast_nodes, type_lookup, out):
 
     # TODO: cache these under 'type*' and 'type?'.  Don't want duplicates!
     if field.seq:
-      runtime_type = runtime.ArrayType(runtime_type)
+      runtime_type = meta.ArrayType(runtime_type)
 
     if field.opt:
-      runtime_type = runtime.MaybeType(runtime_type)
+      runtime_type = meta.MaybeType(runtime_type)
 
     out.append((field.name, runtime_type))
 
@@ -275,8 +334,17 @@ def _AppendFields(field_ast_nodes, type_lookup, out):
 def _MakeReflection(module, app_types):
   # Types that fields are declared with: int, id, word_part, etc.
   # Fields are NOT declared with Constructor names.
-  type_lookup  = dict(runtime.BUILTIN_TYPES)
+  type_lookup = dict(meta.BUILTIN_TYPES)
   type_lookup.update(app_types)
+
+  # TODO: Need to resolve 'imports' to the right descriptor.  Code generation
+  # relies on it:
+  # - To pick the method to call in AbbreviatedTree etc.
+  # - To generate 'value_t' instead of 'value' in type annotations.
+
+  for u in module.uses:
+    for type_name in u.type_names:
+      type_lookup[type_name] = None  # Placeholder
 
   # NOTE: We need two passes because types can be mutually recursive, e.g.
   # asdl/arith.asdl.
@@ -285,11 +353,15 @@ def _MakeReflection(module, app_types):
   for d in module.dfns:
     ast_node = d.value
     if isinstance(ast_node, asdl.Product):
-      type_lookup[d.name] = runtime.CompoundType([])
+      type_lookup[d.name] = meta.CompoundType([])
 
     elif isinstance(ast_node, asdl.Sum):
       is_simple = asdl.is_simple(ast_node)
-      type_lookup[d.name] = runtime.SumType(is_simple)
+
+      simple_variants = []
+      if is_simple:
+        simple_variants = [cons.name for cons in ast_node.types]
+      type_lookup[d.name] = meta.SumType(is_simple, simple_variants)
 
     else:
       raise AssertionError(ast_node)
@@ -303,17 +375,19 @@ def _MakeReflection(module, app_types):
 
     elif isinstance(ast_node, asdl.Sum):
       sum_type = type_lookup[d.name]  # the one we just created
+      # TODO: Remove this -- it used to be used for runtime type checking.
+      # Unused?
+      if 1:
+        for cons in ast_node.types:
+          fields_out = []
+          # fully-qualified name.  Use a _ so we can share strings with class
+          # name.
+          key = '%s__%s' % (d.name, cons.name)
+          cons_type = meta.CompoundType(fields_out)
+          type_lookup[key] = cons_type
+          _AppendFields(cons.fields, type_lookup, fields_out)
 
-      for cons in ast_node.types:
-        fields_out = []
-        # fully-qualified name.  Use a _ so we can share strings with class
-        # name.
-        key = '%s__%s' % (d.name, cons.name)
-        cons_type = runtime.CompoundType(fields_out)
-        type_lookup[key] = cons_type
-        _AppendFields(cons.fields, type_lookup, fields_out)
-
-        sum_type.cases.append(cons_type)
+          sum_type.cases.append(cons_type)
 
     else:
       raise AssertionError(ast_node)
@@ -321,7 +395,7 @@ def _MakeReflection(module, app_types):
   return type_lookup
 
 
-def LoadSchema(f, app_types):
+def LoadSchema(f, app_types, verbose=False):
   """Returns an AST for the schema and a type_lookup dictionary.
   
   Used for code gen and metaprogramming.
@@ -334,6 +408,9 @@ def LoadSchema(f, app_types):
   """
   p = ASDLParser()
   schema_ast = p.parse(f)
+  if verbose:
+    import sys
+    schema_ast.Print(sys.stdout, 0)
 
   v = Check()
   v.visit(schema_ast)

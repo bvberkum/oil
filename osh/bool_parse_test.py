@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 # Copyright 2016 Andy Chu. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,15 +11,11 @@ bool_parse_test.py: Tests for bool_parse.py
 
 import unittest
 
+from _devbuild.gen.id_kind_asdl import Id
+from _devbuild.gen.syntax_asdl import bool_expr_e
+from _devbuild.gen.types_asdl import lex_mode_e
 from core import test_lib
-from core.meta import syntax_asdl, Id, types_asdl
-
-from frontend import parse_lib
-
 from osh import bool_parse  # module under test
-
-bool_expr_e = syntax_asdl.bool_expr_e
-lex_mode_e = types_asdl.lex_mode_e
 
 
 def _ReadWords(w_parser):
@@ -38,8 +34,7 @@ def _ReadWords(w_parser):
 def _MakeParser(code_str):
   # NOTE: We need the extra ]] token
   arena = test_lib.MakeArena('<bool_parse_test.py>')
-  parse_ctx = parse_lib.ParseContext(arena, {})
-  w_parser, _ = parse_ctx.MakeParserForCompletion(code_str + ' ]]', arena)
+  w_parser = test_lib.InitWordParser(code_str + ' ]]', arena=arena)
   w_parser._Next(lex_mode_e.DBracket)  # for tests only
   p = bool_parse.BoolParser(w_parser)
   p._Next()
@@ -62,13 +57,13 @@ class BoolParserTest(unittest.TestCase):
     node = p.ParseFactor()
     print(node)
     self.assertTrue(p._TestAtEnd())
-    self.assertEqual(bool_expr_e.BoolUnary, node.tag)
+    self.assertEqual(bool_expr_e.Unary, node.tag)
 
     p = _MakeParser('foo == bar')
     node = p.ParseFactor()
     print(node)
     self.assertTrue(p._TestAtEnd())
-    self.assertEqual(bool_expr_e.BoolBinary, node.tag)
+    self.assertEqual(bool_expr_e.Binary, node.tag)
 
   def testParseNegatedFactor(self):
     p = _MakeParser('foo')
@@ -114,7 +109,7 @@ class BoolParserTest(unittest.TestCase):
     node = p.ParseFactor()
     print(node)
     self.assertTrue(p._TestAtEnd())
-    self.assertEqual(bool_expr_e.BoolBinary, node.tag)
+    self.assertEqual(bool_expr_e.Binary, node.tag)
 
   def testParseParenthesized(self):
     p = _MakeParser('zoo && ( foo == bar )')

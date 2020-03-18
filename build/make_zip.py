@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """
 make_zip.py
 
@@ -24,6 +24,8 @@ def main(argv):
   seen = {}
   for line in sys.stdin:
     line = line.strip()
+    if not line:  # Some files are hand-edited.  Allow empty lines.
+      continue
     try:
       full_path, rel_path = line.split(None, 1)
     except ValueError:

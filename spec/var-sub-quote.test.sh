@@ -190,3 +190,78 @@ foo='a b c d'
 argv.py "${foo%'c d'}" "${foo%'c  d'}"
 ## stdout: ['a b c d', 'a b c d']
 ## BUG bash/mksh stdout: ['a b ', 'a b c d']
+
+#### $'' allowed within VarSub arguments
+# Odd behavior of bash/mksh: $'' is recognized but NOT ''!
+x=abc
+echo ${x%$'b'*}
+echo "${x%$'b'*}"  # git-prompt.sh relies on this
+## STDOUT:
+a
+a
+## END
+## N-I dash STDOUT:
+abc
+abc
+## END
+
+#### # operator with single quoted arg (dash/ash and bash/mksh disagree, reported by Crestwave)
+var=a
+echo -${var#'a'}-
+echo -"${var#'a'}"-
+var="'a'"
+echo -${var#'a'}-
+echo -"${var#'a'}"-
+## STDOUT:
+--
+--
+-'a'-
+-'a'-
+## END
+## OK dash/ash STDOUT:
+--
+-a-
+-'a'-
+--
+## END
+
+#### / operator with single quoted arg (causes syntax error in regex in OSH, reported by Crestwave)
+var="++--''++--''"
+echo no plus or minus "${var//[+-]}"
+echo no plus or minus "${var//['+-']}"
+## STDOUT:
+no plus or minus ''''
+no plus or minus ''''
+## END
+## status: 0
+## OK osh STDOUT:
+no plus or minus ''''
+## END
+## OK osh status: 1
+## BUG ash STDOUT:
+no plus or minus ''''
+no plus or minus ++--++--
+## END
+## BUG ash status: 0
+## N-I dash stdout-json: ""
+## N-I dash status: 2
+
+#### single quotes work inside character classes
+x='a[[[---]]]b'
+echo "${x//['[]']}"
+## STDOUT:
+a---b
+## END
+## BUG ash STDOUT:
+a[[[---]]]b
+## END
+## N-I dash stdout-json: ""
+## N-I dash status: 2
+
+#### comparison: :- operator with single quoted arg
+echo ${unset:-'a'}
+echo "${unset:-'a'}"
+## STDOUT:
+a
+'a'
+## END

@@ -1,0 +1,37 @@
+-- To test how all ASDL construct generate typed code.
+
+module arith {
+  -- TODO: re-enable this after generating the proper Python code
+  use demo_lib { value }
+  -- Two of them as a test
+  use demo_lib { t2, t3, t4 }
+
+  -- using_value = (string foo, value v)
+
+  -- Simple Sum Type
+  op_id = Plus | Minus | Star
+
+  op_array = (op_id* ops)
+  assign = (string name, string* flags)
+
+  -- Compound Sum Type
+  cflow =
+    Break
+  | Continue
+  | Return(int status)
+
+  source_location = (string path, int line, int col, int length)
+
+  word = (string value)
+
+  bool_expr =
+    Binary(word left, word right)
+  | Unary(word child)
+  | LogicalNot(bool_expr b)
+  | LogicalBinary(op_id op, bool_expr left, bool_expr right)
+
+  Token = (string s, bool b)
+  cflow2 = Break | Continue | Return(int status)
+
+  other = (Token t)
+}

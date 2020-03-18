@@ -1787,6 +1787,9 @@ merge_list_attr(PyObject* dict, PyObject* obj, const char *attrname)
 static PyObject *
 _dir_locals(void)
 {
+#ifdef OBJECTS_ONLY
+    assert(0);
+#else
     PyObject *names;
     PyObject *locals = PyEval_GetLocals();
 
@@ -1807,6 +1810,7 @@ _dir_locals(void)
     }
     /* the locals don't need to be DECREF'd */
     return names;
+#endif
 }
 
 /* Helper for PyObject_Dir of type objects: returns __dict__ and __bases__.
@@ -1826,6 +1830,7 @@ _specialized_dir_type(PyObject *obj)
     return result;
 }
 
+#ifndef OBJECTS_ONLY
 /* Helper for PyObject_Dir of module objects: returns the module's __dict__. */
 static PyObject *
 _specialized_dir_module(PyObject *obj)
@@ -1848,6 +1853,7 @@ _specialized_dir_module(PyObject *obj)
     Py_XDECREF(dict);
     return result;
 }
+#endif
 
 /* Helper for PyObject_Dir of generic objects: returns __dict__, __class__,
    and recursively up the __class__.__bases__ chain.
@@ -1932,12 +1938,16 @@ _dir_object(PyObject *obj)
     }
     if (dirfunc == NULL) {
         /* use default implementation */
+#ifndef OBJECTS_ONLY
         if (PyModule_Check(obj))
             result = _specialized_dir_module(obj);
         else if (PyType_Check(obj) || PyClass_Check(obj))
             result = _specialized_dir_type(obj);
         else
             result = _generic_dir(obj);
+#else
+        result = _generic_dir(obj);
+#endif
     }
     else {
         /* use __dir__ */
@@ -1970,8 +1980,13 @@ PyObject_Dir(PyObject *obj)
     PyObject * result;
 
     if (obj == NULL)
+#ifdef OBJECTS_ONLY
+        /* There are no locals */
+        assert(0);
+#else
         /* no object -- introspect the locals */
         result = _dir_locals();
+#endif
     else
         /* object -- introspect the object */
         result = _dir_object(obj);
@@ -2065,6 +2080,7 @@ PyObject _Py_NotImplementedStruct = {
     1, &PyNotImplemented_Type
 };
 
+#ifndef OBJECTS_ONLY
 void
 _Py_ReadyTypes(void)
 {
@@ -2220,6 +2236,7 @@ _Py_ReadyTypes(void)
     if (PyType_Ready(&PySeqIter_Type) < 0)
         Py_FatalError("Can't initialize sequence iterator type");
 }
+#endif  // OBJECTS_ONLY
 
 
 #ifdef Py_TRACE_REFS
@@ -2331,8 +2348,11 @@ _Py_GetObjects(PyObject *self, PyObject *args)
 PyTypeObject *_Py_capsule_hack = &PyCapsule_Type;
 
 
+/* Note: cobject.c is deprecated in favor of capsule.c in Python 3. */
+#ifndef OBJECTS_ONLY
 /* Hack to force loading of cobject.o */
 PyTypeObject *_Py_cobject_hack = &PyCObject_Type;
+#endif
 
 
 /* Hack to force loading of abstract.o */
@@ -2374,6 +2394,23 @@ PyMem_Free(void *p)
 
 #define KEY "Py_Repr"
 
+/* OBJECTS_ONLY: Use a GLOBAL instead of thread local.  TODO: Put this in a VM
+ * object.
+ */
+PyObject* _dict = NULL;
+
+PyObject *
+_GetDict(void)
+{
+    if (_dict == NULL) {
+        PyObject *d;
+        _dict = d = PyDict_New();
+        if (d == NULL)
+            PyErr_Clear();
+    }
+    return _dict;
+}
+
 int
 Py_ReprEnter(PyObject *obj)
 {
@@ -2381,7 +2418,11 @@ Py_ReprEnter(PyObject *obj)
     PyObject *list;
     Py_ssize_t i;
 
+#ifdef OBJECTS_ONLY
+    dict = _GetDict();
+#else
     dict = PyThreadState_GetDict();
+#endif
     if (dict == NULL)
         return 0;
     list = PyDict_GetItemString(dict, KEY);
@@ -2395,8 +2436,9 @@ Py_ReprEnter(PyObject *obj)
     }
     i = PyList_GET_SIZE(list);
     while (--i >= 0) {
-        if (PyList_GET_ITEM(list, i) == obj)
+        if (PyList_GET_ITEM(list, i) == obj) {
             return 1;
+        }
     }
     PyList_Append(list, obj);
     return 0;
@@ -2409,7 +2451,11 @@ Py_ReprLeave(PyObject *obj)
     PyObject *list;
     Py_ssize_t i;
 
+#ifdef OBJECTS_ONLY
+    dict = _GetDict();
+#else
     dict = PyThreadState_GetDict();
+#endif
     if (dict == NULL)
         return;
     list = PyDict_GetItemString(dict, KEY);

@@ -49,11 +49,20 @@ argv.py "${a[@]}"
 ## BUG mksh stdout: ['1', '2 3', ' 4']
 
 #### Try to append list to element
-# bash - cannot assign list to array number
+# bash - runtime error: cannot assign list to array number
 # mksh - a[-1]+: is not an identifier
+# osh - parse error -- could be better!
 a=(1 '2 3')
 a[-1]+=(4 5)
-## status: 1
+argv.py "${a[@]}"
+## OK bash STDOUT:
+['1', '2 3']
+## END
+## OK bash status: 0
+## N-I mksh stdout-json: ""
+## N-I mksh status: 1
+## OK stdout-json: ""
+## OK osh status: 2
 
 #### Strings have value semantics, not reference semantics
 s1='abc'
@@ -85,24 +94,27 @@ f() {
   #echo $e
 }
 f
-## stdout-json: "a\nb\nc\nd\ne\n"
+## STDOUT:
+a
+b
+c
+d
+e
+## END
 
-#### Append to nonexistent array
-f() {
-  # NOTE: mksh doesn't like a=() after keyword.  Doesn't allow local arrays!
-  local x+=(a b)
-  argv.py "${x[@]}"
+# += is invalid on assignment builtins
+## OK osh stdout-json: ""
+## OK osh status: 1
 
-  y+=(c d)
-  argv.py "${y[@]}"
 
-  readonly z+=(e f)
-  argv.py "${z[@]}"
-}
-f
-## stdout-json: "['a', 'b']\n['c', 'd']\n['e', 'f']\n"
-## N-I mksh stdout-json: ""
-## N-I mksh status: 1
+#### Append to nonexistent array is allowed
+
+## TODO: strict_array could get rid of this?
+y+=(c d)
+argv.py "${y[@]}"
+## STDOUT:
+['c', 'd']
+## END
 
 #### Append used like env prefix is a parse error
 # This should be an error in other shells but it's not.
