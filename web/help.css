@@ -1,0 +1,26 @@
+/* Style for doc/help.md -- 
+ * Extends web/manual.css except we have h4 in addition to h1-h3.
+ * There's a three-level hierarchy of group -> section -> topic.
+ * */
+
+.help-body h3 {
+  font-size: 1em;
+  /* margin-left: 2em; */
+  padding: 1em; 
+  background-color: lavender;
+}
+
+.help-body h4 {
+  font-size: 1em;
+
+  text-align: center;
+  /*
+  text-align: right;
+  margin-right: 3em;
+  */
+
+  /* margin-left: 2em; */
+  /* font-family: monospace; */
+
+  color: darkblue;  /* different than blog */
+}

@@ -1,6 +1,6 @@
-#!/usr/bin/python -S
+# NO SHEBANG because we call it directly.
 """
-py_deps.py
+app_deps.py
 
 Dynamically discover Python and C modules.  We import the main module and
 inspect sys.modules before and after.  That is, we use the exact logic that the
@@ -95,18 +95,8 @@ def FilterModules(modules):
       yield C_MODULE, module, full_path
 
 
-# TODO: Get rid of this?
-def CreateOptionsParser():
-  parser = optparse.OptionParser()
-  return parser
-
-
 def main(argv):
   """Returns an exit code."""
-
-  #(opts, argv) = CreateOptionsParser().parse_args(argv)
-  #if not argv:
-  #  raise Error('No modules specified.')
 
   # Set an environment variable so dependencies in debug mode can be excluded.
   posix.environ['_OVM_DEPS'] = '1'
@@ -134,7 +124,7 @@ def main(argv):
         else:
           raise AssertionError(mod_type)
 
-  elif action == 'py':  # Just .py files
+  elif action == 'py':  # .py path -> .pyc relative path
     modules = ImportMain(main_module, OLD_MODULES)
     for mod_type, full_path, rel_path in FilterModules(modules):
       if mod_type == PY_MODULE:
@@ -142,6 +132,14 @@ def main(argv):
         opy_output = rel_path + 'c'  # output is .pyc
         print(opy_input, opy_output)
 
+  elif action == 'py-manifest':  # .py path -> .py relative path
+    modules = ImportMain(main_module, OLD_MODULES)
+    for mod_type, full_path, rel_path in FilterModules(modules):
+      if mod_type == PY_MODULE:
+        opy_input = full_path
+        assert rel_path.endswith('.py')
+        #mod_name = rel_path[:-3].replace('/', '.')
+        print(opy_input, rel_path)
   else:
     raise RuntimeError('Invalid action %r' % action)
 

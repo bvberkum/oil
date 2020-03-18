@@ -32,8 +32,9 @@ echo $((i+1))
 ## stdout: 2
 
 #### SimpleVarSub within arith
-echo $(($j + 1))
-## stdout: 1
+j=0
+echo $(($j + 42))
+## stdout: 42
 
 #### BracedVarSub within ArithSub
 echo $((${j:-5} + 1))
@@ -68,6 +69,7 @@ echo $((`echo 1` + 2))
 
 #### Invalid string to int
 # bash, mksh, and zsh all treat strings that don't look like numbers as zero.
+shopt -u strict_arith || true
 s=foo
 echo $((s+5))
 ## OK dash stdout-json: ""
@@ -75,26 +77,23 @@ echo $((s+5))
 ## OK bash/mksh/zsh/osh stdout: 5
 ## OK bash/mksh/zsh/osh status: 0
 
-#### Invalid string to int with strict-arith
-set -o strict-arith || true
+#### Invalid string to int with strict_arith
+shopt -s strict_arith || true
 s=foo
 echo $s
 echo $((s+5))
 echo 'should not get here'
 ## status: 1
-## stdout-json: "foo\n"
-## N-I bash status: 0
-## N-I bash STDOUT:
+## STDOUT:
+foo
+## END
+## OK dash status: 2
+## N-I bash/mksh/zsh STDOUT:
 foo
 5
 should not get here
 ## END
-## N-I dash status: 2
-## N-I dash stdout-json: ""
-## N-I mksh status: 1
-## N-I mksh stdout-json: ""
-## N-I zsh status: 1
-## N-I zsh stdout-json: ""
+## N-I bash/mksh/zsh status: 0
 
 #### Newline in the middle of expression
 echo $((1
@@ -124,13 +123,15 @@ echo $a
 ## N-I dash stdout-json: ""
 
 #### Increment undefined variables
+shopt -u strict_arith || true
 (( undef1++ ))
 (( ++undef2 ))
 echo "[$undef1][$undef2]"
 ## stdout: [1][1]
-## N-I dash stdout-json: "[][]\n"
+## N-I dash stdout: [][]
 
-#### Increment and decrement array
+#### Increment and decrement array elements
+shopt -u strict_arith || true
 a=(5 6 7 8)
 (( a[0]++, ++a[1], a[2]--, --a[3] ))
 (( undef[0]++, ++undef[1], undef[2]--, --undef[3] ))
@@ -264,6 +265,7 @@ foo=5
 x=oo
 echo $(( foo + f$x + 1 ))
 ## stdout: 11
+## OK osh stdout: 6
 
 #### Bizarre recursive name evaluation - result of runtime parse/eval
 foo=5
@@ -272,6 +274,7 @@ spam=bar
 eggs=spam
 echo $((foo+1)) $((bar+1)) $((spam+1)) $((eggs+1))
 ## stdout: 6 6 6 6
+## OK osh stdout: 6 1 1 1
 ## N-I dash stdout-json: ""
 ## N-I dash status: 2
 
@@ -365,3 +368,166 @@ echo $(( 2**-1 * 5 ))
 ## OK zsh status: 0
 ## N-I dash stdout-json: ""
 ## N-I dash status: 2
+
+#### Comment not allowed in the middle of multiline arithmetic
+echo $((
+1 +
+2 + \
+3
+))
+echo $((
+1 + 2  # not a comment
+))
+(( a = 3 + 4  # comment
+))
+echo [$a]
+## status: 1
+## STDOUT:
+6
+## END
+## OK dash/osh status: 2
+## OK bash STDOUT:
+6
+[]
+## END
+## OK bash status: 0
+
+#### Can't add integer to indexed array
+declare -a array=(1 2 3)
+echo $((array + 5))
+## status: 1
+## stdout-json: ""
+## BUG bash status: 0
+## BUG bash STDOUT:
+6
+## END
+## N-I dash status: 2
+
+#### Can't add integer to associative array
+typeset -A assoc
+assoc[0]=42
+echo $((assoc + 5))
+## status: 1
+## stdout-json: ""
+## BUG bash/mksh/zsh status: 0
+## BUG bash/mksh/zsh stdout: 47
+## BUG dash status: 0
+## BUG dash stdout: 5
+
+#### Double subscript
+a=(1 2 3)
+echo $(( a[1] ))
+echo $(( a[1][1] ))
+## status: 1
+## OK osh status: 2
+## STDOUT:
+2
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+## OK zsh STDOUT:
+1
+## END
+
+#### result of ArithSub is array
+a=(4 5 6)
+echo declared
+b=$(( a ))
+echo $b
+## status: 1
+## STDOUT:
+declared
+## END
+## BUG bash/mksh status: 0
+## BUG bash/mksh STDOUT:
+declared
+4
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+
+#### result of ArithSub is assoc array
+declare -A A=(['foo']=bar ['spam']=eggs)
+echo declared
+b=$(( A ))
+echo $b
+## status: 1
+## STDOUT:
+declared
+## END
+## N-I mksh stdout-json: ""
+## BUG bash/zsh status: 0
+## BUG bash/zsh STDOUT:
+declared
+0
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+
+#### comma operator
+a=(4 5 6)
+
+# assignment is evaluated
+echo $(( a, last = a[2], 42 ))
+echo last=$last
+## STDOUT:
+42
+last=6
+## END
+# zsh doesn't want to evaluate the array
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+## BUG zsh status: 1
+## BUG zsh stdout-json: ""
+
+#### assignment with dynamic var name
+foo=bar
+echo $(( x$foo = 42 ))
+echo xbar=$xbar
+## STDOUT:
+42
+xbar=42
+## END
+
+#### array assignment with dynamic array name
+foo=bar
+echo $(( x$foo[5] = 42 ))
+echo 'xbar[5]='${xbar[5]}
+## STDOUT:
+42
+xbar[5]=42
+## END
+## BUG zsh STDOUT:
+42
+xbar[5]=
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+
+#### unary assignment with dynamic var name
+foo=bar
+xbar=42
+echo $(( x$foo++ ))
+echo xbar=$xbar
+## STDOUT:
+42
+xbar=43
+## END
+## BUG dash status: 2
+## BUG dash stdout-json: ""
+
+#### unary array assignment with dynamic var name
+foo=bar
+xbar[5]=42
+echo $(( x$foo[5]++ ))
+echo 'xbar[5]='${xbar[5]}
+## STDOUT:
+42
+xbar[5]=43
+## END
+## BUG zsh STDOUT:
+0
+xbar[5]=42
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""

@@ -12,7 +12,27 @@ b=c
 echo ref ${!a} ${a}
 ## stdout: ref c b
 
-#### var ref: positional params
+#### ref to $@ with @
+set -- one two
+ref='@'
+echo ref=${!ref}
+## STDOUT:
+ref=one two
+## END
+
+#### ref to $1 and $2 with 1 and 2
+set -- one two
+ref1='1'
+echo ref1=${!ref1}
+ref2='2'
+echo ref2=${!ref2}
+
+## STDOUT:
+ref1=one
+ref2=two
+## END
+
+#### var ref with 1 and @ and *
 set -- x y
 ref=1; printf "|%s" "${!ref}" $'\n'
 ref=@; printf "|%s" "${!ref}" $'\n'
@@ -23,7 +43,14 @@ ref=*; printf "|%s" "${!ref}" $'\n'
 |x y|
 ## END
 
-#### var ref with special vars
+#### var ref to special var BASH_SOURCE
+ref='LINENO'
+echo lineno=${!ref}
+## STDOUT:
+lineno=2
+## END
+
+#### var ref to $? with '?' (not in Oil)
 myfunc() {
   local ref=$1
   echo ${!ref}
@@ -34,6 +61,10 @@ myfunc '?'  # osh doesn't do this dynamically
 myfunc
 0
 ## END
+## N-I osh STDOUT: 
+myfunc
+## END
+## N-I osh status: 1
 
 #### indirection, *then* fancy expansion features
 check_eq() {
@@ -185,21 +216,17 @@ echo done
 ## OK bash status: 0
 ## OK bash stdout: done
 
-#### declare -n and ${!a}
-declare -n a
-a=b
-b=c
-echo ${!a} ${a}
-## stdout: b c
-
 #### Bad var ref with ${!a}
-#set -o nounset
 a='bad var name'
 echo ref ${!a}
 echo status=$?
 ## STDOUT:
 status=1
 ## END
+
+# this error is fatal in osh
+## OK osh stdout-json: ""
+## OK osh status: 1
 
 #### ${!OPTIND} (used by bash completion
 set -- a b c
@@ -216,3 +243,22 @@ a
 x
 y
 ## END
+
+#### ${!ref-default}
+
+ref=x
+
+echo x=${!ref-default}
+
+x=''
+echo x=${!ref-default}
+
+x=foo
+echo x=${!ref-default}
+
+## STDOUT:
+x=default
+x=
+x=foo
+## END
+

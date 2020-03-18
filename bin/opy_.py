@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 from __future__ import print_function
 """
 opy_.py
@@ -7,22 +7,18 @@ opy_.py
 import os
 import sys
 
-this_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-sys.path.append(os.path.join(this_dir, '..'))
-
 from frontend import args
-from core import util
+from core import pyutil
+from core.util import log
 
 from opy import opy_main
-
-log = util.log
 
 # TODO: move to quick ref?
 _OPY_USAGE = 'Usage: opy_ MAIN [OPTION]... [ARG]...'
 
 
 def _ShowVersion():
-  util.ShowAppVersion('OPy')
+  pyutil.ShowAppVersion('OPy')
 
 
 # Run the bytecode too.  Should this have an option to use byterun?

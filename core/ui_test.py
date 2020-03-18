@@ -1,4 +1,4 @@
-#!/usr/bin/python -S
+#!/usr/bin/env python2
 from __future__ import print_function
 """
 ui_test.py: Tests for ui.py
@@ -8,26 +8,27 @@ import unittest
 
 from core import test_lib
 from core import ui  # module under test
-from core.meta import runtime_asdl
-
-from osh import state
-
-value = runtime_asdl.value
 
 
 class UiTest(unittest.TestCase):
 
-  def testPrompt(self):
-    arena = test_lib.MakeArena('<ui_test.py>')
-    mem = state.Mem('', [], {}, arena)
+  def testStderr(self):
+    ui.Stderr('oops')
 
-    ex = test_lib.InitExecutor(arena=arena)
+  def testErrorFormatter(self):
+    arena = test_lib.MakeArena('')
+    line_id = arena.AddLine('[line one]', 1)
+    span_id = arena.AddLineSpan(line_id, 0, 2)
+    spid1 = arena.AddLineSpan(line_id, 2, 2)
 
-    p = ui.Prompt('osh', arena, ex.parse_ctx, ex, mem)
+    errfmt = ui.ErrorFormatter(arena)
 
-    # Rgression for caching bug!
-    self.assertEqual('foo', p.EvalPrompt(value.Str('foo')))
-    self.assertEqual('foo', p.EvalPrompt(value.Str('foo')))
+    # no location info
+    errfmt.Print('hello')
+
+    errfmt.PushLocation(span_id)
+    errfmt.Print('zero')
+    errfmt.Print('zero', span_id=spid1)
 
 
 if __name__ == '__main__':

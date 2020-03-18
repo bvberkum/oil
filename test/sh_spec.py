@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 from __future__ import print_function
 """
 sh_spec.py -- Test framework to compare shells.
@@ -50,14 +50,18 @@ world
 
 import collections
 import cgi
+import cStringIO
 import json
 import optparse
 import os
 import pprint
 import re
+import shutil
 import subprocess
 import sys
 import time
+
+from doctools import html_head
 
 
 # Magic strings for other variants of OSH.
@@ -68,6 +72,9 @@ import time
 
 OSH_CPYTHON = ('osh', 'osh-dbg')
 OTHER_OSH = ('osh_ALT', 'osh-byterun')
+
+OIL_CPYTHON = ('oil', 'oil-dbg')
+OTHER_OIL = ('oil_ALT',)
 
 
 class ParseError(Exception):
@@ -106,19 +113,31 @@ END_MULTILINE = 3  # STDOUT STDERR
 PLAIN_LINE = 4  # Uncommented
 EOF = 5
 
+LEX_OUTER = 0  # Ignore blank lines
+LEX_KV = 1     # Blank lines are significant
 
-def LineIter(f):
-  """Iterate over lines, classify them by token type, and parse token value."""
-  for i, line in enumerate(f):
-    if not line.strip():
-      continue
 
-    line_num = i+1  # 1-based
+class Tokenizer(object):
+  """Modal lexer!"""
+
+  def __init__(self, f):
+    self.f = f
+
+    self.cursor = None
+    self.line_num = 0
+
+    self.next()
+
+  def _ClassifyLine(self, line, lex_mode):
+    if not line:  # empty
+      return self.line_num, EOF, ''
+
+    if lex_mode == LEX_OUTER and not line.strip() :
+      return None
 
     if line.startswith('####'):
       desc = line[4:].strip()
-      yield line_num, TEST_CASE_BEGIN, desc
-      continue
+      return self.line_num, TEST_CASE_BEGIN, desc
 
     m = KEY_VALUE_RE.match(line)
     if m:
@@ -131,38 +150,31 @@ def LineIter(f):
         token_type = KEY_VALUE_MULTILINE
       else:
         token_type = KEY_VALUE
-      yield line_num, token_type, (qualifier, shells, name, value)
-      continue
+      return self.line_num, token_type, (qualifier, shells, name, value)
 
     m = END_MULTILINE_RE.match(line)
     if m:
-      yield line_num, END_MULTILINE, None
-      continue
+      return self.line_num, END_MULTILINE, None
 
-    if line.lstrip().startswith('#'):
-      # Ignore comments
-      #yield COMMENT, line
-      continue
+    if line.lstrip().startswith('#'):  # Ignore comments
+      return None  # try again
 
     # Non-empty line that doesn't start with '#'
     # NOTE: We need the original line to test the whitespace sensitive <<-.
     # And we need rstrip because we add newlines back below.
-    yield line_num, PLAIN_LINE, line.rstrip('\n')
+    return self.line_num, PLAIN_LINE, line
 
-  yield line_num, EOF, None
-
-
-class Tokenizer(object):
-  """Wrap a token iterator in a Tokenizer interface."""
-
-  def __init__(self, it):
-    self.it = it
-    self.cursor = None
-    self.next()
-
-  def next(self):
+  def next(self, lex_mode=LEX_OUTER):
     """Raises StopIteration when exhausted."""
-    self.cursor = self.it.next()
+    while True:
+      line = self.f.readline()
+      self.line_num += 1
+
+      tok = self._ClassifyLine(line, lex_mode)
+      if tok is not None:
+        break
+
+    self.cursor = tok
     return self.cursor
 
   def peek(self):
@@ -220,13 +232,13 @@ def ParseKeyValue(tokens, case):
 
       value_lines = []
       while True:
-        tokens.next()
+        tokens.next(lex_mode=LEX_KV)  # empty lines aren't skipped
         _, kind2, item2 = tokens.peek()
         if kind2 != PLAIN_LINE:
           break
         value_lines.append(item2)
 
-      value = '\n'.join(value_lines) + '\n'
+      value = ''.join(value_lines)
 
       name = name.lower()  # STDOUT -> stdout
       if qualifier:
@@ -261,7 +273,7 @@ def ParseCodeLines(tokens, case):
   while True:
     _, kind, item = tokens.peek()
     if kind != PLAIN_LINE:
-      case['code'] = '\n'.join(code_lines) + '\n'
+      case['code'] = ''.join(code_lines)
       return
     code_lines.append(item)
     tokens.next()
@@ -276,7 +288,10 @@ def ParseTestCase(tokens):
   if kind == EOF:
     return None
 
-  assert kind == TEST_CASE_BEGIN, (line_num, kind, item)  # Invariant
+  if kind != TEST_CASE_BEGIN:
+    raise RuntimeError(
+        "line %d: Expected TEST_CASE_BEGIN, got %r" % (line_num, [kind, item]))
+
   tokens.next()
 
   case = {'desc': item, 'line_num': line_num}
@@ -399,16 +414,17 @@ def CreateAssertions(case, sh_label):
 
 
 class Result(object):
-  """Possible test results.
+  """Result of an stdout/stderr/status assertion or of a (case, shell) cell.
 
   Order is important: the result of a cell is the minimum of the results of
-  each assertions.
+  each assertion.
   """
-  FAIL = 0
-  BUG = 1
-  NI = 2
-  OK = 3
-  PASS = 4
+  TIMEOUT = 0  # ONLY a cell result, not an assertion result
+  FAIL = 1
+  BUG = 2
+  NI = 3
+  OK = 4
+  PASS = 5
 
 
 class EqualAssertion(object):
@@ -436,29 +452,84 @@ class EqualAssertion(object):
     return Result.PASS, ''  # ideal behavior
 
 
+class Stats(object):
+  def __init__(self, num_cases, sh_labels):
+    self.counters = collections.defaultdict(int)
+    c = self.counters
+    c['num_cases'] = num_cases
+    c['osh_num_passed'] = 0
+    c['osh_num_failed'] = 0
+    # Number of osh_ALT results that differed from osh.
+    c['osh_ALT_delta'] = 0
+
+    self.by_shell = {}
+    for sh in sh_labels:
+      self.by_shell[sh] = collections.defaultdict(int)
+    self.nonzero_results = collections.defaultdict(int)
+
+  def Inc(self, counter_name):
+    self.counters[counter_name] += 1
+
+  def Get(self, counter_name):
+    return self.counters[counter_name]
+
+  def Set(self, counter_name, val):
+    self.counters[counter_name] = val
+
+  def ReportCell(self, cell_result, sh_label):
+    self.by_shell[sh_label][cell_result] += 1
+    self.nonzero_results[cell_result] += 1
+
+    c = self.counters
+    if cell_result == Result.TIMEOUT:
+      c['num_timeout'] += 1
+    elif cell_result == Result.FAIL:
+      # Special logic: don't count osh_ALT beacuse its failures will be
+      # counted in the delta.
+      if sh_label not in OTHER_OSH + OTHER_OIL:
+        c['num_failed'] += 1
+
+      if sh_label in OSH_CPYTHON + OIL_CPYTHON:
+        c['osh_num_failed'] += 1
+    elif cell_result == Result.BUG:
+      c['num_bug'] += 1
+    elif cell_result == Result.NI:
+      c['num_ni'] += 1
+    elif cell_result == Result.OK:
+      c['num_ok'] += 1
+    elif cell_result == Result.PASS:
+      c['num_passed'] += 1
+      if sh_label in OSH_CPYTHON + OIL_CPYTHON:
+        c['osh_num_passed'] += 1
+    else:
+      raise AssertionError()
+
+
 PIPE = subprocess.PIPE
 
-def RunCases(cases, case_predicate, shells, env, out):
+def RunCases(cases, case_predicate, shells, env, out, opts):
   """
   Run a list of test 'cases' for all 'shells' and write output to 'out'.
   """
+  if opts.trace:
+    for _, sh in shells:
+      log('\tshell: %s', sh)
+      log('\twhich:')
+      subprocess.call(['which', sh])
+
   #pprint.pprint(cases)
 
-  out.WriteHeader(shells)
+  sh_labels = [sh_label for sh_label, _ in shells]
 
-  stats = collections.defaultdict(int)
-  stats['num_cases'] = len(cases)
-  stats['osh_num_passed'] = 0
-  stats['osh_num_failed'] = 0
-  # Number of osh_ALT results that differed from osh.
-  stats['osh_ALT_delta'] = 0
+  out.WriteHeader(sh_labels)
+  stats = Stats(len(cases), sh_labels)
 
   # Make an environment for each shell.  $SH is the path to the shell, so we
   # can test flags, etc.
   sh_env = []
   for _, sh_path in shells:
     e = dict(env)
-    e['SH'] = sh_path
+    e[opts.sh_env_var_name] = sh_path
     sh_env.append(e)
 
   # Determine which one (if any) is osh-cpython, for comparison against other
@@ -469,24 +540,78 @@ def RunCases(cases, case_predicate, shells, env, out):
       osh_cpython_index = i
       break
 
+  timeout_dir = os.path.abspath('_tmp/spec/timeouts')
+  try:
+    shutil.rmtree(timeout_dir)
+    os.mkdir(timeout_dir)
+  except OSError:
+    pass
+
   # Now run each case, and print a table.
   for i, case in enumerate(cases):
     line_num = case['line_num']
     desc = case['desc']
     code = case['code']
 
+    if opts.trace:
+      log('case %d: %s', i, desc)
+
     if not case_predicate(i, case):
-      stats['num_skipped'] += 1
+      stats.Inc('num_skipped')
       continue
 
-    #print code
+    stats.Inc('num_cases_run')
 
     result_row = []
 
     for shell_index, (sh_label, sh_path) in enumerate(shells):
-      argv = [sh_path]  # TODO: Be able to test shell flags?
+      timeout_file = os.path.join(timeout_dir, '%s-%d' % (sh_label, i))
+      if opts.timeout:
+        if opts.timeout_bin:
+          # This is what smoosh itself uses.  See smoosh/tests/shell_tests.sh
+          # QUIRK: interval can only be a whole number
+          argv = [
+              opts.timeout_bin,
+              '-t', opts.timeout,
+              # Somehow I'm not able to get this timeout file working?  I think
+              # it has a bug when using stdin.  It waits for the background
+              # process too.
+
+              #'-i', '1',
+              #'-l', timeout_file
+          ]
+        else:
+          # This kills hanging tests properly, but somehow they fail with code
+          # -9?
+          #argv = ['timeout', '-s', 'KILL', opts.timeout]
+
+          # s suffix for seconds
+          argv = ['timeout', opts.timeout + 's']
+      else:
+        argv = []
+      argv.append(sh_path)
+
+      # dash doesn't support -o posix
+      if opts.posix and sh_label != 'dash':
+        argv.extend(['-o', 'posix'])
+
+      if opts.trace:
+        log('\t%s', ' '.join(argv))
+
+      if opts.rm_tmp:  # Remove BEFORE the test case runs.
+        shutil.rmtree(env['TMP'])
+        os.mkdir(env['TMP'])
+
+      cwd = env['TMP'] if opts.cd_tmp else None
+
+      case_env = sh_env[shell_index]
+      if opts.pyann_out_dir:
+        case_env = dict(case_env)
+        case_env['PYANN_OUT'] = os.path.join(
+            opts.pyann_out_dir, '%d.json' % i)
+
       try:
-        p = subprocess.Popen(argv, env=sh_env[shell_index],
+        p = subprocess.Popen(argv, env=case_env, cwd=cwd,
                              stdin=PIPE, stdout=PIPE, stderr=PIPE)
       except OSError as e:
         print('Error running %r: %s' % (sh_path, e), file=sys.stderr)
@@ -503,47 +628,33 @@ def RunCases(cases, case_predicate, shells, env, out):
 
       actual['status'] = p.wait()
 
-      messages = []
-      cell_result = Result.PASS
+      if opts.timeout_bin and os.path.exists(timeout_file):
+        cell_result = Result.TIMEOUT
+      elif not opts.timeout_bin and actual['status'] == 124:
+        cell_result = Result.TIMEOUT
+      else:
+        messages = []
+        cell_result = Result.PASS
 
-      # TODO: Warn about no assertions?  Well it will always test the error
-      # code.
-      assertions = CreateAssertions(case, sh_label)
-      for a in assertions:
-        result, msg = a.Check(sh_label, actual)
-        # The minimum one wins.
-        # If any failed, then the result is FAIL.
-        # If any are OK, but none are FAIL, the result is OK.
-        cell_result = min(cell_result, result)
-        if msg:
-          messages.append(msg)
+        # TODO: Warn about no assertions?  Well it will always test the error
+        # code.
+        assertions = CreateAssertions(case, sh_label)
+        for a in assertions:
+          result, msg = a.Check(sh_label, actual)
+          # The minimum one wins.
+          # If any failed, then the result is FAIL.
+          # If any are OK, but none are FAIL, the result is OK.
+          cell_result = min(cell_result, result)
+          if msg:
+            messages.append(msg)
 
-      if cell_result != Result.PASS:
-        d = (i, sh_label, actual['stdout'], actual['stderr'], messages)
-        out.AddDetails(d)
+        if cell_result != Result.PASS:
+          d = (i, sh_label, actual['stdout'], actual['stderr'], messages)
+          out.AddDetails(d)
 
       result_row.append(cell_result)
 
-      if cell_result == Result.FAIL:
-        # Special logic: don't count osh_ALT beacuse its failures will be
-        # counted in the delta.
-        if sh_label not in OTHER_OSH:
-          stats['num_failed'] += 1
-
-        if sh_label in OSH_CPYTHON:
-          stats['osh_num_failed'] += 1
-      elif cell_result == Result.BUG:
-        stats['num_bug'] += 1
-      elif cell_result == Result.NI:
-        stats['num_ni'] += 1
-      elif cell_result == Result.OK:
-        stats['num_ok'] += 1
-      elif cell_result == Result.PASS:
-        stats['num_passed'] += 1
-        if sh_label in OSH_CPYTHON:
-          stats['osh_num_passed'] += 1
-      else:
-        raise AssertionError
+      stats.ReportCell(cell_result, sh_label)
 
       if sh_label in OTHER_OSH:
         # This is only an error if we tried to run ANY OSH.
@@ -553,7 +664,7 @@ def RunCases(cases, case_predicate, shells, env, out):
         other_result = result_row[shell_index]
         cpython_result = result_row[osh_cpython_index]
         if other_result != cpython_result:
-          stats['osh_ALT_delta'] += 1
+          stats.Inc('osh_ALT_delta')
 
     out.WriteRow(i, line_num, result_row, desc)
 
@@ -603,8 +714,10 @@ _BOLD = '\033[1m'
 _RED = '\033[31m'
 _GREEN = '\033[32m'
 _YELLOW = '\033[33m'
+_PURPLE = '\033[35m'
 
 
+COLOR_TIMEOUT = ''.join([_PURPLE, _BOLD, 'TIME', _RESET])
 COLOR_FAIL = ''.join([_RED, _BOLD, 'FAIL', _RESET])
 COLOR_BUG = ''.join([_YELLOW, _BOLD, 'BUG', _RESET])
 COLOR_NI = ''.join([_YELLOW, _BOLD, 'N-I', _RESET])
@@ -613,6 +726,7 @@ COLOR_PASS = ''.join([_GREEN, _BOLD, 'pass', _RESET])
 
 
 ANSI_CELLS = {
+    Result.TIMEOUT: COLOR_TIMEOUT,
     Result.FAIL: COLOR_FAIL,
     Result.BUG: COLOR_BUG,
     Result.NI: COLOR_NI,
@@ -621,12 +735,26 @@ ANSI_CELLS = {
 }
 
 HTML_CELLS = {
+    Result.TIMEOUT: '<td class="timeout">TIME',
     Result.FAIL: '<td class="fail">FAIL',
     Result.BUG: '<td class="bug">BUG',
     Result.NI: '<td class="n-i">N-I',
     Result.OK: '<td class="ok">ok',
     Result.PASS: '<td class="pass">pass',
 }
+
+
+def _ValidUtf8String(s):
+  """Return an arbitrary string as a readable utf-8 string.
+
+  We output utf-8 to either HTML or the console.  If we get invalid utf-8 as
+  stdout/stderr (which is very possible), then show the ASCII repr().
+  """
+  try:
+    s.decode('utf-8')
+    return s  # it decoded OK
+  except UnicodeDecodeError:
+    return repr(s)  # ASCII representation
 
 
 class ColorOutput(object):
@@ -642,10 +770,10 @@ class ColorOutput(object):
   def BeginCases(self, test_file):
     self.f.write('%s\n' % test_file)
 
-  def WriteHeader(self, shells):
+  def WriteHeader(self, sh_labels):
     self.f.write(_BOLD)
     self.f.write('case\tline\t')  # for line number and test number
-    for sh_label, _ in shells:
+    for sh_label in sh_labels:
       self.f.write(sh_label)
       self.f.write('\t')
     self.f.write(_RESET)
@@ -671,26 +799,54 @@ class ColorOutput(object):
       print('case: %d' % case_index, file=self.f)
       for m in messages:
         print(m, file=self.f)
+
+      # Assume the terminal can show utf-8, but we don't want random binary.
       print('%s stdout:' % shell, file=self.f)
-      try:
-        print(stdout.decode('utf-8'), file=self.f)
-      except UnicodeDecodeError:
-        print(stdout, file=self.f)
+      print(_ValidUtf8String(stdout), file=self.f)
+
       print('%s stderr:' % shell, file=self.f)
-      try:
-        print(stderr.decode('utf-8'), file=self.f)
-      except UnicodeDecodeError:
-        print(stderr, file=self.f)
+      print(_ValidUtf8String(stderr), file=self.f)
+
       print('', file=self.f)
 
   def _WriteStats(self, stats):
     self.f.write(
-        '%(num_passed)d passed, %(num_ok)d ok, '
-        '%(num_ni)d known unimplemented, %(num_bug)d known bugs, '
-        '%(num_failed)d failed, %(num_skipped)d skipped\n' % stats)
+        '%(num_passed)d passed, %(num_ok)d OK, '
+        '%(num_ni)d not implemented, %(num_bug)d BUG, '
+        '%(num_failed)d failed, %(num_timeout)d timeouts, '
+        '%(num_skipped)d cases skipped\n' % stats.counters)
 
-  def EndCases(self, stats):
-    self._WriteStats(stats)
+  def _WriteShellSummary(self, sh_labels, stats):
+    if len(stats.nonzero_results) <= 1:  # Skip trivial summaries
+      return
+
+    # Reiterate header
+    self.f.write(_BOLD)
+    self.f.write('\t\t')
+    for sh_label in sh_labels:
+      self.f.write(sh_label)
+      self.f.write('\t')
+    self.f.write(_RESET)
+    self.f.write('\n')
+
+    # Write totals by cell.  TODO: Switch to spaces instead of tabs and
+    # right-justify?
+
+    for result in sorted(stats.nonzero_results, reverse=True):
+      self.f.write('\t%s' % ANSI_CELLS[result])
+      for sh_label in sh_labels:
+        self.f.write('\t%d' % stats.by_shell[sh_label][result])
+      self.f.write('\n')
+
+    # The bottom row is all the same, but it helps readability.
+    self.f.write('\ttotal')
+    for sh_label in sh_labels:
+      self.f.write('\t%d' % stats.counters['num_cases_run'])
+    self.f.write('\n')
+
+  def EndCases(self, sh_labels, stats):
+    print()
+    self._WriteShellSummary(sh_labels, stats)
 
 
 class AnsiOutput(ColorOutput):
@@ -704,19 +860,19 @@ class HtmlOutput(ColorOutput):
     self.spec_name = spec_name
     self.sh_labels = sh_labels  # saved from header
     self.cases = cases  # for linking to code
+    self.row_html = []  # buffered
 
   def _SourceLink(self, line_num, desc):
     return '<a href="%s.test.html#L%d">%s</a>' % (
         self.spec_name, line_num, cgi.escape(desc))
 
   def BeginCases(self, test_file):
+    css_urls = [ '../../web/base.css', '../../web/spec-tests.css' ]
+    title = '%s: spec test case results' % self.spec_name
+    html_head.Write(self.f, title, css_urls=css_urls)
+
     self.f.write('''\
-<!DOCTYPE html>
-<html>
-  <head>
-    <link href="../../web/spec-tests.css" rel="stylesheet">
-  </head>
-  <body>
+  <body class="width60">
     <p id="home-link">
       <a href=".">spec test index</a>
       /
@@ -726,11 +882,121 @@ class HtmlOutput(ColorOutput):
     <table>
     ''' % test_file)
 
-  def EndCases(self, stats):
+  def _WriteShellSummary(self, sh_labels, stats):
+    # NOTE: This table has multiple <thead>, which seems OK.
+    self.f.write('''
+<thead>
+  <tr class="table-header">
+  ''')
+
+    columns = ['status'] + sh_labels + ['']
+    for c in columns:
+      self.f.write('<td>%s</td>' % c)
+
+    self.f.write('''
+  </tr>
+</thead>
+''')
+    # Write totals by cell.  TODO: Switch to spaces instead of tabs and
+    # right-justify?
+
+    for result in sorted(stats.nonzero_results, reverse=True):
+      self.f.write('<tr>')
+
+      self.f.write(HTML_CELLS[result])
+      self.f.write('</td> ')
+
+      for sh_label in sh_labels:
+        self.f.write('<td>%d</td>' % stats.by_shell[sh_label][result])
+
+      self.f.write('<td></td>')
+      self.f.write('</tr>\n')
+
+    # The bottom row is all the same, but it helps readability.
+    self.f.write('<tr>')
+    self.f.write('<td>total</td>')
+    for sh_label in sh_labels:
+      self.f.write('<td>%d</td>' % stats.counters['num_cases_run'])
+    self.f.write('<td></td>')
+    self.f.write('</tr>\n')
+
+    # Blank row for space.
+    self.f.write('<tr>')
+    for i in xrange(len(sh_labels) + 2):
+      self.f.write('<td style="height: 2em"></td>')
+    self.f.write('</tr>\n')
+
+  def WriteHeader(self, sh_labels):
+    f = cStringIO.StringIO()
+
+    f.write('''
+<thead>
+  <tr class="table-header">
+  ''')
+
+    columns = ['case'] + sh_labels
+    for c in columns:
+      f.write('<td>%s</td>' % c)
+    f.write('<td class="case-desc">description</td>')
+
+    f.write('''
+  </tr>
+</thead>
+''')
+
+    self.row_html.append(f.getvalue())
+
+  def WriteRow(self, i, line_num, row, desc):
+    f = cStringIO.StringIO()
+    f.write('<tr>')
+    f.write('<td>%3d</td>' % i)
+
+    show_details = False
+
+    for result in row:
+      c = HTML_CELLS[result]
+      if result not in (Result.PASS, Result.TIMEOUT):  # nothing to show
+        show_details = True
+
+      f.write(c)
+      f.write('</td>')
+      f.write('\t')
+
+    f.write('<td class="case-desc">')
+    f.write(self._SourceLink(line_num, desc))
+    f.write('</td>')
+    f.write('</tr>\n')
+
+    # Show row with details link.
+    if show_details:
+      f.write('<tr>')
+      f.write('<td class="details-row"></td>')  # for the number
+
+      for col_index, result in enumerate(row):
+        f.write('<td class="details-row">')
+        if result != Result.PASS:
+          sh_label = self.sh_labels[col_index]
+          f.write('<a href="#details-%s-%s">details</a>' % (i, sh_label))
+        f.write('</td>')
+
+      f.write('<td class="details-row"></td>')  # for the description
+      f.write('</tr>\n')
+
+    self.row_html.append(f.getvalue())  # buffer it
+
+  def EndCases(self, sh_labels, stats):
+    self._WriteShellSummary(sh_labels, stats)
+
+    # Write all the buffered rows
+    for h in self.row_html:
+      self.f.write(h)
+
     self.f.write('</table>\n')
-    self.f.write('<p>')
+    self.f.write('<pre>')
     self._WriteStats(stats)
-    self.f.write('</p>')
+    if stats.Get('osh_num_failed'):
+      self.f.write('%(osh_num_failed)d failed under osh\n' % stats.counters)
+    self.f.write('</pre>')
 
     if self.details:
       self._WriteDetails()
@@ -763,14 +1029,10 @@ class HtmlOutput(ColorOutput):
 
       def _WriteRaw(s):
         self.f.write('<pre>')
-        # We output utf-8-encoded HTML.  If we get invalid utf-8 as stdout
-        # (which is very possible), then show the ASCII repr().
-        try:
-          s.decode('utf-8')
-        except UnicodeDecodeError:
-          valid_utf8 = repr(s)  # ASCII representation
-        else:
-          valid_utf8 = s
+
+        # stdout might contain invalid utf-8; make it valid;
+        valid_utf8 = _ValidUtf8String(s)
+
         self.f.write(cgi.escape(valid_utf8))
         self.f.write('</pre>')
 
@@ -785,57 +1047,22 @@ class HtmlOutput(ColorOutput):
 
     self.f.write('</table>')
 
-  def WriteHeader(self, shells):
-    # TODO: Use oil template language for this...
-    self.f.write('''
-<thead>
-  <tr>
-  ''')
 
-    columns = ['case'] + [sh_label for sh_label, _ in shells]
-    for c in columns:
-      self.f.write('<td>%s</td>' % c)
-    self.f.write('<td class="case-desc">description</td>')
+def MakeTestEnv(opts):
+  if not opts.tmp_env:
+    raise RuntimeError('--tmp-env required')
+  if not opts.path_env:
+    raise RuntimeError('--path-env required')
+  env = {
+    'TMP': os.path.normpath(opts.tmp_env),  # no .. or .
+    'PATH': opts.path_env,
+    'LANG': opts.lang_env,
+  }
+  for p in opts.env_pair:
+    name, value = p.split('=', 1)
+    env[name] = value
 
-    self.f.write('''
-  </tr>
-</thead>
-''')
-
-  def WriteRow(self, i, line_num, row, desc):
-    self.f.write('<tr>')
-    self.f.write('<td>%3d</td>' % i)
-
-    non_passing = False
-
-    for result in row:
-      c = HTML_CELLS[result]
-      if result != Result.PASS:
-        non_passing = True
-
-      self.f.write(c)
-      self.f.write('</td>')
-      self.f.write('\t')
-
-    self.f.write('<td class="case-desc">')
-    self.f.write(self._SourceLink(line_num, desc))
-    self.f.write('</td>')
-    self.f.write('</tr>\n')
-
-    # Show row with details link.
-    if non_passing:
-      self.f.write('<tr>')
-      self.f.write('<td class="details-row"></td>')  # for the number
-
-      for col_index, result in enumerate(row):
-        self.f.write('<td class="details-row">')
-        if result != Result.PASS:
-          sh_label = self.sh_labels[col_index]
-          self.f.write('<a href="#details-%s-%s">details</a>' % (i, sh_label))
-        self.f.write('</td>')
-
-      self.f.write('<td class="details-row"></td>')  # for the description
-      self.f.write('</tr>\n')
+  return env
 
 
 def Options():
@@ -843,9 +1070,12 @@ def Options():
   p = optparse.OptionParser('sh_spec.py [options] TEST_FILE shell...')
   p.add_option(
       '-v', '--verbose', dest='verbose', action='store_true', default=False,
-      help='Show details about test execution')
+      help='Show details about test failures')
   p.add_option(
-      '--range', dest='range', default=None,
+      '-t', '--trace', dest='trace', action='store_true', default=False,
+      help='trace execution of shells to diagnose hangs')
+  p.add_option(
+      '-r', '--range', dest='range', default=None,
       help='Execute only a given test range, e.g. 5-10, 5-, -10, or 5')
   p.add_option(
       '--regex', dest='regex', default=None,
@@ -866,12 +1096,49 @@ def Options():
   p.add_option(
       '--osh-failures-allowed', dest='osh_failures_allowed', type='int',
       default=0, help="Allow this number of osh failures")
+
   p.add_option(
       '--path-env', dest='path_env', default='',
       help="The full PATH, for finding binaries used in tests.")
   p.add_option(
       '--tmp-env', dest='tmp_env', default='',
       help="A temporary directory that the tests can use.")
+
+  # Notes:
+  # - utf-8 is the Ubuntu default
+  # - this flag has limited usefulness.  It may be better to simply export LANG=
+  #   in this test case itself.
+  p.add_option(
+      '--lang-env', dest='lang_env', default='en_US.UTF-8',
+      help="The LANG= setting, which affects various libc functions.")
+  p.add_option(
+      '--env-pair', dest='env_pair', default=[], action='append',
+      help='A key=value pair to add to the environment')
+
+  p.add_option(
+      '--timeout', dest='timeout', default='',
+      help="Prefix shell invocation with 'timeout N'")
+  p.add_option(
+      '--timeout-bin', dest='timeout_bin', default=None,
+      help="Use the smoosh timeout binary at this location.")
+
+  p.add_option(
+      '--posix', dest='posix', default=False, action='store_true',
+      help='Pass -o posix to the shell (when applicable)')
+
+  p.add_option(
+      '--sh-env-var-name', dest='sh_env_var_name', default='SH',
+      help="Set this environment variable to the path of the shell")
+  p.add_option(
+      '--no-cd-tmp', dest='cd_tmp', default=True, action='store_false',
+      help="Don't cd to the $TMP dir first")
+  p.add_option(
+      '--rm-tmp', dest='rm_tmp', default=False, action='store_true',
+      help='clear the tmp dir after running each test case')
+
+  p.add_option(
+      '--pyann-out-dir', dest='pyann_out_dir', default=None,
+      help='Run OSH with PYANN_OUT=$dir/$case_num.json')
 
   return p
 
@@ -887,7 +1154,7 @@ def main(argv):
     raise AssertionError('got $PPID = %s' % v)
 
   o = Options()
-  (opts, argv) = o.parse_args(argv)
+  opts, argv = o.parse_args(argv)
 
   try:
     test_file = argv[1]
@@ -899,19 +1166,28 @@ def main(argv):
 
   shell_pairs = []
   saw_osh = False
+  saw_oil = False
   for path in shells:
     name, _ = os.path.splitext(path)
     label = os.path.basename(name)
+
     if label == 'osh':
       # change the second 'osh' to 'osh_ALT' so it's distinct
       if saw_osh:
         label = 'osh_ALT'
       else:
         saw_osh = True
+
+    if label == 'oil':
+      if saw_oil:
+        label = 'oil_ALT'
+      else:
+        saw_oil = True
+
     shell_pairs.append((label, path))
 
   with open(test_file) as f:
-    tokens = Tokenizer(LineIter(f))
+    tokens = Tokenizer(f)
     cases = ParseTestFile(tokens)
 
   # List test cases and return
@@ -943,49 +1219,45 @@ def main(argv):
 
     out = HtmlOutput(sys.stdout, opts.verbose, spec_name, sh_labels, cases)
   else:
-    raise AssertionError
+    raise AssertionError()
 
   out.BeginCases(os.path.basename(test_file))
 
-  if not opts.tmp_env:
-    raise RuntimeError('--tmp-env required')
-  if not opts.path_env:
-    raise RuntimeError('--path-env required')
-  env = {
-    'TMP': os.path.normpath(opts.tmp_env),  # no .. or .
-    'PATH': opts.path_env,
-    # Copied from my own environment.  For now, we want to test bash and other
-    # shells in utf-8 mode.
-    'LANG': 'en_US.UTF-8',
-  }
-  stats = RunCases(cases, case_predicate, shell_pairs, env, out)
-  out.EndCases(stats)
+  env = MakeTestEnv(opts)
+  stats = RunCases(cases, case_predicate, shell_pairs, env, out, opts)
 
-  stats['osh_failures_allowed'] = opts.osh_failures_allowed
+  out.EndCases([sh_label for sh_label, _ in shell_pairs], stats)
+
+  stats.Set('osh_failures_allowed', opts.osh_failures_allowed)
   if opts.stats_file:
     with open(opts.stats_file, 'w') as f:
-      f.write(opts.stats_template % stats)
+      f.write(opts.stats_template % stats.counters)
       f.write('\n')  # bash 'read' requires a newline
 
-  if stats['num_failed'] == 0:
+  if stats.Get('num_failed') == 0:
     return 0
 
+  # spec/smoke.test.sh -> smoke
+  test_name = os.path.basename(test_file).split('.')[0]
+
   allowed = opts.osh_failures_allowed
-  all_count = stats['num_failed']
-  osh_count = stats['osh_num_failed']
+  all_count = stats.Get('num_failed')
+  osh_count = stats.Get('osh_num_failed')
   if allowed == 0:
     log('')
-    log('FATAL: %d tests failed (%d osh failures)', all_count, osh_count)
+    log('%s: FATAL: %d tests failed (%d osh failures)', test_name, all_count,
+        osh_count)
     log('')
   else:
     # If we got EXACTLY the allowed number of failures, exit 0.
     if allowed == all_count and all_count == osh_count:
-      log('note: Got %d allowed osh failures (exit with code 0)', allowed)
+      log('%s: note: Got %d allowed osh failures (exit with code 0)',
+          test_name, allowed)
       return 0
     else:
       log('')
-      log('FATAL: Got %d failures (%d osh failures), but %d are allowed',
-          all_count, osh_count, allowed)
+      log('%s: FATAL: Got %d failures (%d osh failures), but %d are allowed',
+          test_name, all_count, osh_count, allowed)
       log('')
 
   return 1

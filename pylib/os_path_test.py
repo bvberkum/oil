@@ -1,4 +1,4 @@
-#!/usr/bin/python -S
+#!/usr/bin/env python2
 """
 os_path_test.py: Tests for os_path.py
 """
@@ -11,9 +11,8 @@ from pylib import os_path  # module under test
 
 class OsPathTest(unittest.TestCase):
 
-  def testPathExists(self):
-    self.assertEqual(True, os_path.exists('/'))
-    self.assertEqual(False, os_path.exists('/nonexistent__ZZZZ'))
+  def testBasename(self):
+    self.assertEqual('bar', os_path.basename('foo/bar'))
 
 
 if __name__ == '__main__':

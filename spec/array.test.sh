@@ -147,13 +147,17 @@ argv.py "${!a[1]}"
 ## stdout: ['bar']
 ## N-I mksh stdout: ['a[1]']
 
-#### ${!a} on array
-# bash gives empty string?
+#### ${!a} on array is disallowed
+# bash gives empty string because it's like a[0]
 # mksh gives the name of the variable with !.  Very weird.
 a=(1 '2 3')
 argv.py "${!a}"
-## stdout: ['']
-## OK mksh stdout: ['a']
+## stdout-json: ""
+## status: 1
+## BUG bash stdout: ['']
+## BUG bash status: 0
+## BUG mksh stdout: ['a']
+## BUG mksh status: 0
 
 #### All elements unquoted
 a=(1 '2 3')
@@ -188,11 +192,10 @@ argv.py "${a[@]}"
 export PYTHONPATH=(a b c)
 export PYTHONPATH=a  # NOTE: in bash, this doesn't work afterward!
 printenv.py PYTHONPATH
-## stdout: None
-## OK mksh stdout-json: ""
-## OK mksh status: 1
-## OK osh stdout-json: ""
-## OK osh status: 2
+## stdout-json: ""
+## status: 1
+## OK bash stdout: None
+## OK bash status: 0
 
 #### Arrays can't be used as env bindings
 # Hm bash it treats it as a string!
@@ -229,10 +232,11 @@ argv.py "${a[@]}"
 a=(1 2)
 a[0]=(3 4)
 echo "status=$?"
-## stdout: status=1
-## status: 0
-## N-I mksh stdout-json: ""
+## stdout-json: ""
+## status: 2
 ## N-I mksh status: 1
+## BUG bash stdout: status=1
+## BUG bash status: 0
 
 #### Slice of array with [@]
 # mksh doesn't support this syntax!  It's a bash extension.
@@ -242,15 +246,21 @@ argv.py "${a[@]:1:2}"
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
 
-#### Negative slice
+#### Negative slice begin
 # mksh doesn't support this syntax!  It's a bash extension.
 # NOTE: for some reason -2) has to be in parens?  Ah that's because it
 # conflicts with :-!  That's silly.  You can also add a space.
-a=(1 2 3)
-argv.py "${a[@]:(-2):1}"
-## stdout: ['2']
+a=(1 2 3 4 5)
+argv.py "${a[@]:(-4)}"
+## stdout: ['2', '3', '4', '5']
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
+
+#### Negative slice length
+a=(1 2 3 4 5)
+argv.py "${a[@]: 1: -3}"
+## status: 1
+## stdout-json: ""
 
 #### Slice with arithmetic
 a=(1 2 3)
@@ -292,8 +302,8 @@ argv.py "${array[@]}"
 
 #### Array syntax in wrong place
 ls foo=(1 2)
-## status: 2
-## OK mksh status: 1
+## status: 1
+## OK bash status: 2
 
 #### Single array with :-
 # bash does EMPTY ELISION here, unless it's double quoted.  mksh has
@@ -367,16 +377,18 @@ default=('1 2' '3')
 argv.py "${undef[@]:-${default[@]}}"
 ## stdout: ['1 2', '3']
 
-#### Singleton Array Copy and Assign.  Can't index string with int.
+#### Singleton Array Copy and Assign.  OSH can't index strings with ints
 a=( '12 3' )
 b=( "${a[@]}" )
 c="${a[@]}"  # This decays it to a string
-d=$a  # This decays it to a string
+d=${a[*]}  # This decays it to a string
 echo ${#a[0]} ${#b[0]}
 echo ${#a[@]} ${#b[@]}
-# osh is intentionally stricter about arrays, and these fail.
+
+# osh is intentionally stricter, and these fail.
 echo ${#c[0]} ${#d[0]}
 echo ${#c[@]} ${#d[@]}
+
 ## status: 1
 ## STDOUT:
 4 4
@@ -461,13 +473,44 @@ argv.py "${a[@]:15:2}"
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
 
-#### Using an array itself as the index
-# TODO: Fix OSH crash.
-# NOTE: strict-arith prevents this nonsentical behavior.
+#### Using an array itself as the index on LHS
+shopt -u strict_arith
 a[a]=42
 a[a]=99
-argv "${a[@]}" "${a[0]}" "${a[42]}" "${a[99]}"
-## STDOUT:
+argv.py "${a[@]}" "${a[0]}" "${a[42]}" "${a[99]}"
+
+## status: 1
+## stdout-json: ""
+
+## BUG bash/mksh status: 0
+## BUG bash/mksh STDOUT:
 ['42', '99', '42', '99', '']
 ## END
 
+#### Using an array itself as the index on RHS
+shopt -u strict_arith
+a=(1 2 3)
+(( x = a[a] ))
+echo $x
+## status: 1
+## stdout-json: ""
+## BUG bash/mksh status: 0
+## BUG bash/mksh STDOUT:
+2
+## END
+
+#### a[$x$y] on LHS and RHS
+x=1
+y=2
+a[$x$y]=foo
+
+# not allowed by OSH parsing
+#echo ${a[$x$y]}
+
+echo ${a[12]}
+echo ${#a[@]}
+
+## STDOUT:
+foo
+1
+## END

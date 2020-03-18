@@ -41,20 +41,102 @@ f
 ['f']
 ## END
 
-#### FUNCNAME with source
+#### FUNCNAME with source (scalar or array)
+
+# Comments on bash quirk:
+# https://github.com/oilshell/oil/pull/656#issuecomment-599162211
+
 f() {
   . spec/testdata/echo-funcname.sh
 }
 g() {
   f
 }
+
 g
+echo -----
+
 . spec/testdata/echo-funcname.sh
+echo -----
+
 argv.py "${FUNCNAME[@]}"
+
+# Show bash inconsistency.  FUNCNAME doesn't behave like a normal array.
+case $SH in 
+  (bash)
+    echo -----
+    a=('A')
+    argv.py '  @' "${a[@]}"
+    argv.py '  0' "${a[0]}"
+    argv.py '${}' "${a}"
+    argv.py '  $' "$a"
+    ;;
+esac
+
 ## STDOUT:
-['source', 'f', 'g']
-['source']
+['  @', 'source', 'f', 'g']
+['  0', 'source']
+['${}', 'source']
+['  $', 'source']
+-----
+['  @', 'source']
+['  0', 'source']
+['${}', 'source']
+['  $', 'source']
+-----
 []
+## END
+## BUG bash STDOUT:
+['  @', 'source', 'f', 'g']
+['  0', 'source']
+['${}', 'source']
+['  $', 'source']
+-----
+['  @', 'source']
+['  0', 'source']
+['${}', '']
+['  $', '']
+-----
+[]
+-----
+['  @', 'A']
+['  0', 'A']
+['${}', 'A']
+['  $', 'A']
+## END
+
+
+#### BASH_SOURCE and BASH_LINENO scalar or array (e.g. for virtualenv)
+
+# https://github.com/pypa/virtualenv/blob/master/virtualenv_embedded/activate.sh
+# https://github.com/akinomyoga/ble.sh/blob/6f6c2e5/ble.pp#L374
+
+argv.py "$BASH_SOURCE"  # SimpleVarSub
+argv.py "${BASH_SOURCE}"  # BracedVarSub
+argv.py "$BASH_LINENO"  # SimpleVarSub
+argv.py "${BASH_LINENO}"  # BracedVarSub
+argv.py "$FUNCNAME"  # SimpleVarSub
+argv.py "${FUNCNAME}"  # BracedVarSub
+echo __
+source spec/testdata/bash-source-string.sh
+
+## STDOUT:
+['']
+['']
+['']
+['']
+['']
+['']
+__
+['spec/testdata/bash-source-string.sh']
+['spec/testdata/bash-source-string.sh']
+['8']
+['8']
+____
+['spec/testdata/bash-source-string2.sh']
+['spec/testdata/bash-source-string2.sh']
+['11']
+['11']
 ## END
 
 #### ${BASH_SOURCE[@]} with source and function name
@@ -99,22 +181,3 @@ f  # line 9
 ['G', '6', '10']
 ['end F', '10']
 ## END
-
-#### $LINENO is the current line, not line of function call
-echo $LINENO  # first line
-g() {
-  argv.py $LINENO  # line 3
-}
-f() {
-  argv.py $LINENO  # line 6
-  g
-  argv.py $LINENO  # line 8
-}
-f
-## STDOUT: 
-1
-['6']
-['3']
-['8']
-## END
-

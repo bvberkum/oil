@@ -1,24 +1,21 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """
 osh2oil_test.py: Tests for osh2oil.py
 """
 
 import unittest
 
-from osh import word
+from _devbuild.gen.runtime_asdl import word_style_e
+from osh import word_
 from tools import osh2oil  # module under test
 
-from _devbuild.gen import runtime_asdl
-
 from osh.word_parse_test import _assertReadWord
-
-word_style_e = runtime_asdl.word_style_e
 
 
 def assertStyle(test, expected_style, word_str):
   w = _assertReadWord(test, word_str)
 
-  new_word = word.TildeDetect(w)
+  new_word = word_.TildeDetect(w)
   if new_word is not None:
     w = new_word
 

@@ -3,23 +3,63 @@
  * built into /releases.html.
  */
 
-.file-table {
-  width: 100%;
+h1 {
+  font-size: 1.5em;  /* reduce to what browsers apparently use for h2 */
 }
+
+h2 {
+  font-size: 1.2em;  /* reduce to what browsers apparently use for h3 */
+}
+
+h3 {
+  font-size: 1.0em;
+  margin-left: 1em;
+  color: darkgreen;  /* different than blog */
+}
+
+pre {
+  color: green;
+  margin-left: 4em;
+}
+
+code {
+  color: green;
+}
+
+/* END COMMON */
+
+
+/* Downlad links are in both releases.html and /release/$VERSION/index.html */
+
+.release-table {
+  padding: 1em;
+}
+
+.file-table {
+  padding: 1em;
+  background-color: oldlace;
+}
+
+.file-table table {
+  width: 100%
+}
+
 .file-table-heading {
   color: darkgreen;
 }
 
 .filename {
+  font-size: large;
   font-family: monospace;
 }
 
 .size {
+  text-align: right;
 }
 .checksum {
   font-family: monospace;
   font-size: small;
-  color: #555;
+  color: #444;
 }
 
 .version-number {
@@ -27,3 +67,9 @@
   font-weight: bold;
 }
 
+.date {
+  font-size: medium;
+  color: #555;
+  padding-left: 1em;
+  padding-right: 1em;
+}

@@ -9,7 +9,10 @@
 
 -include _build/opy/ovm.d
 
-_build/opy/py27.grammar.pickle:
+# for typing module
+OPY_PYPATH := $(REPO_ROOT):$(REPO_ROOT)/vendor
+
+_build/opy/py27.grammar.marshal:
 	bin/opyc pgen2 opy/py27.grammar $@
 
 _build/opy/main_name.c:
@@ -17,15 +20,15 @@ _build/opy/main_name.c:
 
 _build/opy/app-deps-%.txt: _build/detected-config.sh build/app_deps.py
 	test -d _build/opy && \
-	  $(ACTIONS_SH) app-deps opy $(REPO_ROOT) bin.opy_
+	  $(ACTIONS_SH) app-deps opy $(OPY_PYPATH) bin.opy_
 
 _build/opy/py-to-compile.txt: _build/detected-config.sh build/app_deps.py
 	test -d _build/opy && \
-	  $(ACTIONS_SH) py-to-compile $(REPO_ROOT) bin.opy_ > $@
+	  $(ACTIONS_SH) py-to-compile $(OPY_PYPATH) bin.opy_ > $@
 
 
 # TODO: oil-version can be like this too.
-GRAMMAR = _build/opy/py27.grammar.pickle
+GRAMMAR = _build/opy/py27.grammar.marshal
 
 OPY_BYTECODE_DEPS := \
 	_build/release-date.txt \

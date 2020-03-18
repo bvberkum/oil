@@ -1,0 +1,53 @@
+-- Abstract representation of a 'find' expression.
+
+module find
+{
+  expr =
+    Concatenation(expr* exprs)
+  | Disjunction(expr* exprs)
+  | Conjunction(expr* exprs)
+  | Negation(expr expr)
+
+  | True_
+  | False_
+
+  | PathTest(pathAccessor a, predicate p)
+  | StatTest(statAccessor a, predicate p)
+
+  | DeleteAction
+  | PruneAction
+  | QuitAction
+  | PrintAction(string? file, string? format)
+  | LsAction(string? file)
+  | ExecAction(bool batch, bool dir, bool ok, string* argv)
+
+  pathAccessor =
+    FullPath
+  | Filename
+
+  statAccessor =
+    AccessTime
+  | CreationTime
+  | ModificationTime
+  | Filesystem
+  | Inode
+  | LinkCount
+  | Mode
+  | Filetype
+  | Uid
+  | Gid
+  | Username
+  | Groupname
+  | Size
+
+  predicate =
+    EQ(int n)
+  | GE(int n)
+  | LE(int n)
+  | StringMatch(string str, bool? ignoreCase)
+  | GlobMatch(string glob, bool? ignoreCase)
+  | RegexMatch(string re, bool? ignoreCase)
+  | Readable
+  | Writable
+  | Executable
+}

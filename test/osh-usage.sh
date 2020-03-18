@@ -26,6 +26,8 @@ ast-formats() {
   bin/osh -n --ast-format abbrev-html -c 'echo hi'
   bin/osh -n --ast-format html -c 'echo hi'
 
+  # Removed with oheap
+  return
   local ast_bin=_tmp/smoke-ast.bin 
   bin/osh -n --ast-format oheap -c 'echo hi' > $ast_bin
   ls -l $ast_bin
@@ -38,10 +40,10 @@ osh-file() {
   cat >_tmp/smoke-prog.sh <<EOF
 echo hi
 
-func() {
+myfunc() {
   echo "inside func"
 }
-func 1 2 3
+myfunc 1 2 3
 
 # TODO: Test vars don't persist.
 (echo "in subshell"; echo "another")
@@ -86,7 +88,7 @@ echo \$(
 echo command sub
 )
 
-func() {
+myfunc() {
   echo hi
 }
 
@@ -96,22 +98,30 @@ EOF
 osh-interactive() {
   set +o errexit
   echo 'echo hi' | $OSH -i
+  assert $? -eq 0
 
   echo 'exit' | $OSH -i
+  assert $? -eq 0
 
   # Parse failure
   echo ';' | $OSH -i
+  assert $? -eq 2
 
   # Bug fix: this shouldn't try execute 'echo OIL OIL'
   # The line lexer wasn't getting reset on parse failures.
   echo ';echo OIL OIL' | $OSH -i
+  assert $? -eq 2
+
+  # Bug fix: c_parser.Peek() in main_loop.InteractiveLoop can raise execptions
+  echo 'v=`echo \"`' | $OSH -i
+  assert $? -eq 2
 }
 
 help() {
   set +o errexit
 
   # TODO: Test the oil.ovm binary as well as bin/oil.py.
-  export PYTHONPATH=.
+  export PYTHONPATH='.:vendor/'  # TODO: Put this in one place.
 
   # Bundle usage.
   bin/oil.py --help
@@ -138,13 +148,39 @@ exit-builtin-interactive() {
   assert $? -eq 42
 }
 
+rc-file() {
+  local rc=_tmp/testrc
+  echo 'PS1="TESTRC$ "' > $rc
+  bin/osh -i --rcfile $rc < /dev/null
+  bin/osh -i --rcfile /dev/null < /dev/null
+}
+
+noexec-fails-properly() {
+  set +o errexit
+  local tmp=_tmp/osh-usage-noexec.txt
+  bin/osh -n -c 'echo; echo; |' > $tmp
+  assert $? -eq 2
+  read < $tmp
+  assert $? -eq 1  # shouldn't have read any lines!
+  echo "$tmp appears empty, as expected"
+}
+
+version() {
+  set +o errexit
+  bin/osh --version
+  assert $? -eq 0
+}
+
 readonly -a PASSING=(
   ast-formats
   osh-file
   osh-stdin
   osh-interactive
   exit-builtin-interactive
+  rc-file
   help
+  noexec-fails-properly
+  version
 )
 
 all-passing() {

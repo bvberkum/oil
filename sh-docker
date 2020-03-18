@@ -3,8 +3,8 @@ set -e
 
 PPWD="$(pwd -P)"
 
-docker pull bvberkum/treebox:dev
+docker pull dotmpe/treebox:dev
 
 docker run \
   -v $PPWD/sh-docker-inner:/sh-docker.sh \
-  -ti --rm bvberkum/treebox:dev sh -c /sh-docker.sh
+  -ti --rm dotmpe/treebox:dev sh -c /sh-docker.sh

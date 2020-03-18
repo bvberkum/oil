@@ -28,6 +28,7 @@ echo status=$?
 
 #### how compgen calls completion functions
 foo_complete() {
+  # first, cur, prev
   argv.py argv "$@"
   argv.py COMP_WORDS "${COMP_WORDS[@]}"
   argv.py COMP_CWORD "${COMP_CWORD}"
@@ -54,7 +55,12 @@ wrapper=foo
 complete -o default -o nospace -F $wrapper git
 ## status: 0
 
-#### compopt -o (git)
+#### compopt with invalid syntax
+compopt -o invalid
+echo status=$?
+## stdout: status=2
+
+#### compopt fails when not in completion function
 # NOTE: Have to be executing a completion function
 compopt -o filenames +o nospace
 ## status: 1
@@ -107,7 +113,7 @@ PWD
 
 #### compgen with actions: function / variable / file 
 mkdir -p $TMP/compgen2
-touch $TMP/compgen2/PA_FILE_{1,2}
+touch $TMP/compgen2/{PA,Q}_FILE
 cd $TMP/compgen2  # depends on previous test above!
 PA_FUNC() { echo P; }
 Q_FUNC() { echo Q; }
@@ -115,8 +121,7 @@ compgen -A function -A variable -A file PA
 ## STDOUT:
 PA_FUNC
 PATH
-PA_FILE_1
-PA_FILE_2
+PA_FILE
 ## END
 
 #### compgen with actions: alias, setopt
@@ -144,11 +149,168 @@ false___
 ## END
 
 #### compgen -A directory
-compgen -A directory b
+# omit portable-files.mk
+compgen -A directory p | sort
+## STDOUT:
+pgen2
+pylib
+py-yajl
+## END
+
+#### compgen -A file
+compgen -A file b | sort
+## STDOUT:
+benchmarks
+bin
+build
+## END
+
+#### compgen -A user
+# no assertion because this isn't hermetic
+compgen -A user
+## status: 0
+
+#### compgen -A command completes external commands
+# NOTE: this test isn't hermetic
+compgen -A command xarg | uniq
+echo status=$?
+## STDOUT:
+xargs
+status=0
+## END
+
+#### compgen -A command completes functions and aliases
+my_func() { echo ; }
+my_func2() { echo ; }
+alias my_alias=foo
+compgen -A command my_
+echo status=$?
+## STDOUT:
+my_alias
+my_func
+my_func2
+status=0
+## END
+
+#### compgen -A command completes builtins and keywords
+compgen -A command eva
+echo status=$?
+compgen -A command whil
+echo status=$?
+## STDOUT:
+eval
+status=0
+while
+status=0
+## END
+
+#### complete with nonexistent function
+complete -F invalidZZ -D
+echo status=$?
+## stdout: status=2
+## BUG bash stdout: status=0
+
+#### complete with no action
+complete foo
+echo status=$?
+## stdout: status=2
+## BUG bash stdout: status=0
+
+#### -o filenames and -o nospace have no effect with compgen 
+# they are POSTPROCESSING.
+compgen -o filenames -o nospace -W 'bin build'
 ## STDOUT:
 bin
-benchmarks
 build
+## END
+
+#### -o plusdirs and -o dirnames with compgen
+compgen -o plusdirs -W 'a b1 b2' b | sort
+echo ---
+compgen -o dirnames b | sort
+## STDOUT:
+b1
+b2
+benchmarks
+bin
+build
+---
+benchmarks
+bin
+build
+## END
+
+#### compgen -o default completes files and dirs
+compgen -o default spec/t | sort
+## STDOUT:
+spec/testdata
+spec/tilde.test.sh
+spec/type-compat.test.sh
+## END
+
+#### compgen doesn't respect -X for user-defined functions
+# WORKAROUND: wrap in bash -i -c because non-interactive bash behaves
+# differently!
+case $SH in
+  *bash|*osh)
+    $SH --rcfile /dev/null -i -c '
+shopt -s extglob
+fun() {
+  COMPREPLY=(one two three bin)
+}
+compgen -X "@(two|bin)" -F fun
+echo --
+compgen -X "!@(two|bin)" -F fun
+'
+esac
+## STDOUT:
+one
+three
+--
+two
+bin
+## END
+
+#### compgen -W words -X filter
+# WORKAROUND: wrap in bash -i -c because non-interactive bash behaves
+# differently!
+case $SH in
+  *bash|*osh)
+      $SH --rcfile /dev/null -i -c 'shopt -s extglob; compgen -X "@(two|bin)" -W "one two three bin"'
+esac
+## STDOUT:
+one
+three
+## END
+
+#### compgen -f -X filter -- $cur
+cd $TMP
+touch spam.py spam.sh
+compgen -f -- sp | sort
+echo --
+# WORKAROUND: wrap in bash -i -c because non-interactive bash behaves
+# differently!
+case $SH in
+  *bash|*osh)
+      $SH --rcfile /dev/null -i -c 'shopt -s extglob; compgen -f -X "!*.@(py)" -- sp'
+esac
+## STDOUT:
+spam.py
+spam.sh
+--
+spam.py
+## END
+
+#### compgen doesn't need shell quoting
+# There is an obsolete comment in bash_completion that claims the opposite.
+cd $TMP
+touch 'foo bar'
+touch "foo'bar"
+compgen -f "foo b"
+compgen -f "foo'"
+## STDOUT:
+foo bar
+foo'bar
 ## END
 
 #### compgen -W 'one two three'
@@ -171,14 +333,59 @@ w1
 w2
 ## END
 
-#### complete with nonexistent function
-complete -F invalidZZ -D
-echo status=$?
-## stdout: status=2
-## BUG bash stdout: status=0
+#### compgen -W evaluates code in $()
+IFS=':%'
+compgen -W '$(echo "spam:eggs%ham cheese")'
+## STDOUT:
+spam
+eggs
+ham cheese
+## END
 
-#### complete with no action
-complete foo
+#### compgen -W uses IFS, and delimiters are escaped with \
+IFS=':%'
+compgen -W 'spam:eggs%ham cheese\:colon'
+## STDOUT:
+spam
+eggs
+ham cheese:colon
+## END
+
+#### Parse errors for compgen -W and complete -W
+# bash doesn't detect as many errors because it lacks static parsing.
+compgen -W '${'
 echo status=$?
-## stdout: status=2
-## BUG bash stdout: status=0
+complete -W '${' foo
+echo status=$?
+## STDOUT:
+status=2
+status=2
+## END
+## BUG bash STDOUT:
+status=1
+status=0
+## END
+
+#### Runtime errors for compgen -W 
+compgen -W 'foo $(( 1 / 0 )) bar'
+echo status=$?
+## STDOUT:
+status=1
+## END
+
+#### Runtime errors for compgen -F func
+_foo() {
+  COMPREPLY=( foo bar )
+  COMPREPLY+=( $(( 1 / 0 )) )  # FATAL, but we still have candidates
+}
+compgen -F _foo foo
+echo status=$?
+## STDOUT:
+status=1
+## END
+
+#### compgen -W '' cmd is not a usage error
+# Bug fix due to '' being falsey in Python
+compgen -W '' -- foo
+echo status=$?
+## stdout: status=1

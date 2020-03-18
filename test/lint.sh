@@ -8,6 +8,7 @@
 set -o nounset
 set -o pipefail
 set -o errexit
+shopt -s strict:all 2>/dev/null || true  # dogfood for OSH
 
 source build/common.sh
 
@@ -25,31 +26,29 @@ get-cpplint() {
 }
 
 cpplint() {
-  _tmp/cpplint.py --filter -readability/todo,-legal/copyright \
-    *.{cc,h} shell/*.{cc,h}
+  # we don't have subdir names on the header guard
+  _tmp/cpplint.py --filter \
+    -readability/todo,-legal/copyright,-build/header_guard,-build/include,-whitespace/comments "$@"
 }
 
 clang-format() {
   #$CLANG_DIR/bin/clang-format -style=Google "$@"
 
+  # I like consistent Python-style functions and blocks, e.g. not if (x) return
+  local style='{ BasedOnStyle: Google,
+      IndentCaseLabels: false,
+      AllowShortFunctionsOnASingleLine: None,
+      AllowShortBlocksOnASingleLine: false,
+    }
+  '
   # We have a lot of switch statements, and the extra indent doesn't help.
-  $CLANG_DIR/bin/clang-format \
-    -style="{BasedOnStyle: Google, IndentCaseLabels: false}" \
-    "$@"
+  $CLANG_DIR/bin/clang-format -style="$style" "$@"
 }
 
-# TODO: -i
-# Integrate with editor.
+# Not ready to do this yet?
+# I don't like one liners like Constructor : v_() {}
 format-oil() {
-  #clang-format -i shell/util.cc shell/util.h shell/string_piece.h
-  #clang-format -i shell/lex.re2c.cc shell/lex.h
-
-  clang-format -i *.{cc,h} shell/*.{cc,h}
-  git diff
-}
-
-format-demo() {
-  clang-format -i demo/*.cc
+  clang-format -i cpp/*.{cc,h} mycpp/*.{cc,h}
   git diff
 }
 
@@ -58,11 +57,6 @@ format-demo() {
 #
 
 # yapf: was useful, but might cause big diffs
-
-# After 'pip install pep8' on Ubunu, it's in ~/.local.
-bin-pep8() {
-  ~/.local/bin/pep8 "$@"
-}
 
 # Language independent
 find-src() {
@@ -90,24 +84,46 @@ find-long-lines() {
   find-src | xargs grep -n '^.\{81\}' | grep -v 'http'
 }
 
+_parse-one-oil() {
+  local path=$1
+  echo $path
+  if ! bin/osh -O all:oil -n $path >/dev/null; then
+    return 255  # stop xargs
+  fi
+}
+
+all-oil-parse() {
+  ### Make sure they parse with shopt -s all:oil
+  ### Will NOT Parse with all:nice.
+  find-src |
+    grep '.sh$' |
+    egrep -v 'spec/|/parse-errors/' |
+    xargs -n 1 -- $0 _parse-one-oil
+}
+
 bin-flake8() {
   local ubuntu_flake8=~/.local/bin/flake8 
   if test -f "$ubuntu_flake8"; then
     $ubuntu_flake8 "$@"
   else
-    # Assume it's in $PATH, like on Travis.
-    flake8 "$@"
+    python2 -m flake8 "$@"
   fi
 }
 
+# Just do a single file
+flake8-one() {
+  bin-flake8 --ignore 'E111,E114,E226,E265' "$@"
+}
+
 flake8-all() {
-  local -a dirs=(asdl bin core oil_lang osh opy ovm2)
+  local -a dirs=(asdl bin core oil_lang osh opy ovm2 tools)
 
   # astgen.py has a PROLOGUE which must have unused imports!
   # opcode.py triggers a flake8 bug?  Complains about def_op() when it is
   # defined.
+  # _abbrev.py modules are concatenated, and don't need to check on their own.
   local -a exclude=(
-    --exclude 'opy/_regtest,opy/byterun,opy/tools/astgen.py,opy/lib/opcode.py')
+    --exclude 'tools/find,tools/xargs,opy/_*,opy/byterun,opy/tools/astgen.py,opy/lib/opcode.py,*/*_abbrev.py')
 
   # Step 1: Stop the build if there are Python syntax errors, undefined names,
   # unused imports
@@ -138,7 +154,82 @@ flake8-all() {
 
 # Hook for travis
 travis() {
+  if test -n "${TRAVIS_SKIP:-}"; then
+    echo "TRAVIS_SKIP: Skipping $0"
+    return
+  fi
+
   flake8-all
 }
 
+#
+# Adjust and Check shebang lines.  It matters for developers on different distros.
+#
+
+find-py() {
+  # don't touch mycpp yet because it's in Python 3
+  # build has build/app_deps.py which needs the -S
+  find \
+    -name '_*' -a -prune -o \
+    -name 'Python-*' -a -prune -o \
+    -name 'mycpp' -a -prune -o \
+    -name 'build' -a -prune -o \
+    -name '*.py' "$@"
+}
+
+print-if-has-shebang() {
+  read first < $1
+  [[ "$first" == '#!'* ]]  && echo $1
+}
+
+not-executable() {
+  find-py -a ! -executable -a -print | xargs -n 1 -- $0 print-if-has-shebang
+}
+
+executable-py() {
+  find-py -a -executable -a -print | xargs -n 1 -- echo
+}
+
+# Make all shebangs consistent.
+# - Specify python2 because on some distros 'python' is python3
+# - Use /usr/bin/env because it works better with virtualenv?
+#
+# https://stackoverflow.com/questions/9309940/sed-replace-first-line
+replace-shebang() {
+  # e.g. cat edit.list, change the first line
+  sed -i '1c#!/usr/bin/env python2' "$@"
+}
+
+#
+# sprintf -- What do we need in mycpp?
+#
+
+sp-formats() {
+  egrep --no-filename --only-matching '%.' */*.py | sort | uniq -c | sort -n
+}
+
+# 122 instances of these.  %() for named
+sp-rare() {
+  egrep --color=always '%[^srd ]' */*.py  | egrep -v 'Python-|_test.py'
+}
+
+#
+# inherit
+#
+
+# 56 instances of inheritance
+inheritance() {
+  grep ^class {osh,core,oil_lang,frontend}/*.py \
+    | egrep -v '_test|object'
+}
+
+# 18 unique base classes.
+# TODO: Maybe extract this automatically with OPy?
+# Or does the MyPy AST have enough?
+# You can collect method defs in the decl phase.  Or in the forward_decl phase?
+
+base-classes() {
+  inheritance | egrep -o '\(.*\)' | sort | uniq -c | sort -n
+}
+ 
 "$@"

@@ -26,7 +26,7 @@
 
 #### Function with spaces, to see if ( and ) are separate tokens.
 # NOTE: Newline after ( is not OK.
-func ( ) { echo in-func; }; func
+fun ( ) { echo in-func; }; fun
 ## stdout: in-func
 
 #### subshell function
@@ -64,8 +64,12 @@ func-name=ext
 ## OK mksh stdout-json: ""
 
 #### Function name with $
-# bash allows this; dash doesn't.
-foo$bar() { ls ; }
+$foo-bar() { ls ; }
+## status: 2
+## OK bash/mksh status: 1
+
+#### Function name with command sub
+foo-$(echo hi)() { ls ; }
 ## status: 2
 ## OK bash/mksh status: 1
 
@@ -83,17 +87,20 @@ foo-bar() { ls ; }
 
 #### Break after ) is OK.
 # newline is always a token in "normal" state.
-echo hi; func ( )
+echo hi; fun ( )
 { echo in-func; }
-func
-## stdout-json: "hi\nin-func\n"
+fun
+## STDOUT:
+hi
+in-func
+## END
 
 #### Nested definition
 # A function definition is a command, so it can be nested
-func() {
+fun() {
   nested_func() { echo nested; }
   nested_func
 }
-func
+fun
 ## stdout: nested
 

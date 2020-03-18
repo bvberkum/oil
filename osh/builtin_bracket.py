@@ -1,209 +1,247 @@
-#!/usr/bin/env python
 """
 builtin_bracket.py
 """
 from __future__ import print_function
 
-from core import util
-from core import meta
-from core.meta import Id, runtime_asdl, syntax_asdl
+from _devbuild.gen.id_kind_asdl import Id
+from _devbuild.gen.id_kind import (
+    TEST_UNARY_LOOKUP, TEST_BINARY_LOOKUP, TEST_OTHER_LOOKUP
+)
+from _devbuild.gen.runtime_asdl import value, quote_e, quote_t
+from _devbuild.gen.syntax_asdl import (
+    word, word_e, word_t, word__String,
+    bool_expr,
+)
+from _devbuild.gen.types_asdl import lex_mode_e
 
-from osh import expr_eval
+from asdl import runtime
+from core import error
+from core.util import p_die
+from osh import sh_expr_eval
 from osh import bool_parse
+from osh import word_parse
+from osh import word_eval
 
-word = syntax_asdl.word
-bool_expr = syntax_asdl.bool_expr
-value = runtime_asdl.value
+from typing import cast, TYPE_CHECKING
 
-log = util.log
+if TYPE_CHECKING:
+  from _devbuild.gen.runtime_asdl import cmd_value__Argv, value__Str
+  from _devbuild.gen.syntax_asdl import word__String, bool_expr_t
+  from _devbuild.gen.types_asdl import lex_mode_t
+  from core.ui import ErrorFormatter
+  from core import optview
+  from core import state
 
-_UNARY_LOOKUP = meta.TEST_UNARY_LOOKUP
-_BINARY_LOOKUP = meta.TEST_BINARY_LOOKUP
-_OTHER_LOOKUP = meta.TEST_OTHER_LOOKUP
 
+class _StringWordEmitter(word_parse.WordEmitter):
+  """For test/[, we need a word parser that returns String.
 
-class _StringWordEmitter(object):
-  """For test/[, we need a word parser that returns StringWord.
-
-  The BoolParser calls word.BoolId(w), and deals with Kind.BoolUnary,
-  Kind.BoolBinary, etc.  This is instead of CompoundWord/TokenWord (as in the
+  The BoolParser calls word_.BoolId(w), and deals with Kind.BoolUnary,
+  Kind.BoolBinary, etc.  This is instead of Compound/Token (as in the
   [[ case.
   """
-  def __init__(self, argv):
-    self.argv = argv
+  def __init__(self, cmd_val):
+    # type: (cmd_value__Argv) -> None
+    self.cmd_val = cmd_val
     self.i = 0
-    self.n = len(argv)
+    self.n = len(cmd_val.argv)
 
   def ReadWord(self, unused_lex_mode):
+    # type: (lex_mode_t) -> word__String
+    """Interface for bool_parse.py.
+
+    TODO: This should probably be word_t
+    """
     if self.i == self.n:
-      # NOTE: Could define something special
-      return word.StringWord(Id.Eof_Real, '')
+      # Does it make sense to define Eof_Argv or something?
+      # TODO: Add a way to show this location.  Show 1 char past the right-most
+      # spid of the last word?  But we only have the left-most spid.
+      w = word.String(Id.Eof_Real, '', runtime.NO_SPID)
+      return w
 
     #log('ARGV %s i %d', self.argv, self.i)
-    s = self.argv[self.i]
+    s = self.cmd_val.argv[self.i]
+    left_spid = self.cmd_val.arg_spids[self.i]
     self.i += 1
 
     # default is an operand word
-    id_ = (
-        _UNARY_LOOKUP.get(s) or _BINARY_LOOKUP.get(s) or _OTHER_LOOKUP.get(s)
-        or Id.Word_Compound)
+    id_int = (
+        TEST_UNARY_LOOKUP.get(s) or
+        TEST_BINARY_LOOKUP.get(s) or
+        TEST_OTHER_LOOKUP.get(s)
+    )
 
-    return word.StringWord(id_, s)
+    id_ = Id.Word_Compound if id_int is None else id_int
+
+    # NOTE: We only have the left spid now.  It might be useful to add the
+    # right one.
+    w = word.String(id_, s, left_spid)
+    return w
+
+  def Read(self):
+    # type: () -> word__String
+    """Interface used for special cases below."""
+    return self.ReadWord(lex_mode_e.ShCommand)
+
+  def Peek(self, offset):
+    # type: (int) -> str
+    """For special cases."""
+    return self.cmd_val.argv[self.i + offset]
+
+  def Rewind(self, offset):
+    # type: (int) -> None
+    """For special cases."""
+    self.i -= offset
 
 
-class _WordEvaluator(object):
+class _WordEvaluator(word_eval.StringWordEvaluator):
 
-  def EvalWordToString(self, w, do_fnmatch=False, do_ere=False):
+  def EvalWordToString(self, w, quote_kind=quote_e.Default):
+    # type: (word_t, quote_t) -> value__Str
     # do_fnmatch: for the [[ == ]] semantics which we don't have!
     # I think I need another type of node
     # Maybe it should be BuiltinEqual and BuiltinDEqual?  Parse it into a
     # different tree.
-    return value.Str(w.s)
+    assert w.tag_() == word_e.String
+    string_word = cast(word__String, w)
+    return value.Str(string_word.s)
 
 
-def _StringWordTest(s):
-  # TODO: Could be Word_String
-  return bool_expr.WordTest(word.StringWord(Id.Word_Compound, s))
-
-
-def _TwoArgs(argv):
+def _TwoArgs(w_parser):
+  # type: (_StringWordEmitter) -> bool_expr_t
   """Returns an expression tree to be evaluated."""
-  a0, a1 = argv
-  if a0 == '!':
-    return bool_expr.LogicalNot(_StringWordTest(a1))
-  unary_id = _UNARY_LOOKUP.get(a0)
+  w0 = w_parser.Read()
+  w1 = w_parser.Read()
+  if w0.s == '!':
+    return bool_expr.LogicalNot(bool_expr.WordTest(w1))
+  unary_id = TEST_UNARY_LOOKUP.get(w0.s)
   if unary_id is None:
     # TODO:
-    # - syntax error
     # - separate lookup by unary
-    util.p_die('Expected unary operator, got %r (2 args)', a0)
-  child = word.StringWord(Id.Word_Compound, a1)
-  return bool_expr.BoolUnary(unary_id, child)
+    p_die('Expected unary operator, got %r (2 args)', w0.s, word=w0)
+  return bool_expr.Unary(unary_id, w1)
 
 
-def _ThreeArgs(argv):
+def _ThreeArgs(w_parser):
+  # type: (_StringWordEmitter) -> bool_expr_t
   """Returns an expression tree to be evaluated."""
-  a0, a1, a2 = argv
+  w0 = w_parser.Read()
+  w1 = w_parser.Read()
+  w2 = w_parser.Read()
 
   # NOTE: Order is important here.
 
-  binary_id = _BINARY_LOOKUP.get(a1)
+  binary_id = TEST_BINARY_LOOKUP.get(w1.s)
   if binary_id is not None:
-    left = word.StringWord(Id.Word_Compound, a0)
-    right = word.StringWord(Id.Word_Compound, a2)
-    return bool_expr.BoolBinary(binary_id, left, right)
+    return bool_expr.Binary(binary_id, w0, w2)
 
-  if a1 == '-a':
-    left = _StringWordTest(a0)
-    right = _StringWordTest(a2)
-    return bool_expr.LogicalAnd(left, right)
+  if w1.s == '-a':
+    return bool_expr.LogicalAnd(bool_expr.WordTest(w0), bool_expr.WordTest(w2))
 
-  if a1 == '-o':
-    left = _StringWordTest(a0)
-    right = _StringWordTest(a2)
-    return bool_expr.LogicalOr(left, right)
+  if w1.s == '-o':
+    return bool_expr.LogicalOr(bool_expr.WordTest(w0), bool_expr.WordTest(w2))
 
-  if a0 == '!':
-    child = _TwoArgs(argv[1:])
+  if w0.s == '!':
+    w_parser.Rewind(2)
+    child = _TwoArgs(w_parser)
     return bool_expr.LogicalNot(child)
 
-  if a0 == '(' and a2 == ')':
-    return _StringWordTest(a1)
+  if w0.s == '(' and w2.s == ')':
+    return bool_expr.WordTest(w1)
 
-  util.p_die('Syntax error: binary operator expected, got %r (3 args)', a1)
+  p_die('Expected binary operator, got %r (3 args)', w1.s, word=w1)
 
 
-def Test(argv, need_right_bracket):
-  """The test/[ builtin.
+class Test(object):
+  def __init__(self, need_right_bracket, exec_opts, mem, errfmt):
+    # type: (bool, optview.Exec, state.Mem, ErrorFormatter) -> None
+    self.need_right_bracket = need_right_bracket
+    self.exec_opts = exec_opts
+    self.mem = mem
+    self.errfmt = errfmt
 
-  The only difference between test and [ is that [ needs a matching ].
-  """
-  if need_right_bracket:
-    if not argv or argv[-1] != ']':
-      util.error('[: missing closing ]')
+  def Run(self, cmd_val):
+    # type: (cmd_value__Argv) -> int
+    """The test/[ builtin.
+
+    The only difference between test and [ is that [ needs a matching ].
+    """
+    if self.need_right_bracket:  # Preprocess right bracket
+      strs = cmd_val.argv
+      if not strs or strs[-1] != ']':
+        self.errfmt.Print('missing closing ]', span_id=cmd_val.arg_spids[0])
+        return 2
+      # Remove the right bracket
+      cmd_val.argv.pop()
+      cmd_val.arg_spids.pop()
+
+    w_parser = _StringWordEmitter(cmd_val)
+    w_parser.Read()  # dummy: advance past argv[0]
+    b_parser = bool_parse.BoolParser(w_parser)
+
+    # There is a fundamental ambiguity due to poor language design, in cases like:
+    # [ -z ]
+    # [ -z -a ]
+    # [ -z -a ] ]
+    #
+    # See posixtest() in bash's test.c:
+    # "This is an implementation of a Posix.2 proposal by David Korn."
+    # It dispatches on expressions of length 0, 1, 2, 3, 4, and N args.  We do
+    # the same here.
+    #
+    # Another ambiguity:
+    # -a is both a unary prefix operator and an infix operator.  How to fix this
+    # ambiguity?
+
+    bool_node = None # type: bool_expr_t
+    n = len(cmd_val.argv) - 1
+    try:
+      if n == 0:
+        return 1  # [ ] is False
+      elif n == 1:
+        w = w_parser.Read()
+        bool_node = bool_expr.WordTest(w)
+      elif n == 2:
+        bool_node = _TwoArgs(w_parser)
+      elif n == 3:
+        bool_node = _ThreeArgs(w_parser)
+      if n == 4:
+        a0 = w_parser.Peek(0)
+        if a0 == '!':
+          w_parser.Read()  # skip !
+          child = _ThreeArgs(w_parser)
+          bool_node = bool_expr.LogicalNot(child)
+        elif a0 == '(' and w_parser.Peek(3) == ')':
+          w_parser.Read()  # skip ')'
+          bool_node = _TwoArgs(w_parser)
+        else:
+          pass  # fallthrough
+
+      if bool_node is None:
+        bool_node = b_parser.ParseForBuiltin()
+
+    except error.Parse as e:
+      self.errfmt.PrettyPrintError(e, prefix='(test) ')
       return 2
-    del argv[-1]
 
-  w_parser = _StringWordEmitter(argv)
-  b_parser = bool_parse.BoolParser(w_parser)
+    # mem: Don't need it for BASH_REMATCH?  Or I guess you could support it
+    word_ev = _WordEvaluator()
+    bool_ev = sh_expr_eval.BoolEvaluator(self.mem, self.exec_opts, self.errfmt)
 
-  # There is a fundamental ambiguity due to poor language design, in cases like:
-  # [ -z ]
-  # [ -z -a ]
-  # [ -z -a ] ]
-  #
-  # See posixtest() in bash's test.c:
-  # "This is an implementation of a Posix.2 proposal by David Korn."
-  # It dispatches on expressions of length 0, 1, 2, 3, 4, and N args.  We do
-  # the same here.
-  #
-  # Another ambiguity:
-  # -a is both a unary prefix operator and an infix operator.  How to fix this
-  # ambiguity?
+    # We want [ a -eq a ] to always be an error, unlike [[ a -eq a ]].  This is a
+    # weird case of [[ being less strict.
+    bool_ev.Init_AlwaysStrict()
+    bool_ev.word_ev = word_ev
+    bool_ev.CheckCircularDeps()
+    try:
+      b = bool_ev.Eval(bool_node) # type = bool
+    except error.FatalRuntime as e:
+      # Hack: we don't get the (test) prefix but we get location info.  We
+      # don't have access to mem.CurrentSpanId() here.
+      if not e.HasLocation():
+        raise
+      self.errfmt.PrettyPrintError(e, prefix='(test) ')
+      return 2  # 1 means 'false', and this usage error is like a parse error.
 
-  bool_node = None
-  n = len(argv)
-  try:
-    if n == 0:
-      return 1  # [ ] is False
-    elif n == 1:
-      bool_node = _StringWordTest(argv[0])
-    elif n == 2:
-      bool_node = _TwoArgs(argv)
-    elif n == 3:
-      bool_node = _ThreeArgs(argv)
-    if n == 4:
-      a0 = argv[0]
-      if a0 == '!':
-        child = _ThreeArgs(argv[1:])
-        bool_node = bool_expr.LogicalNot(child)
-      elif a0 == '(' and argv[3] == ')':
-        bool_node = _TwoArgs(argv[1:3])
-      else:
-        pass  # fallthrough
-
-    if bool_node is None:
-      bool_node = b_parser.ParseForBuiltin()
-
-  except util.ParseError as e:
-    # TODO: There should be a nice method to print argv.  And some way to point
-    # to the error.
-    log("Error parsing %s", argv)
-    util.error("test: %s", e.UserErrorString())
-    return 2  # parse error is 2
-
-  # mem: Don't need it for BASH_REMATCH?  Or I guess you could support it
-  # exec_opts: don't need it, but might need it later
-
-  mem = None  # Not necessary
-  word_ev = _WordEvaluator()
-  arena = None
-
-  # We want [ a -eq a ] to always be an error, unlike [[ a -eq a ]].  This is a
-  # weird case of [[ being less strict.
-  class _DummyExecOpts():
-    def __init__(self):
-      self.strict_arith = True
-  exec_opts = _DummyExecOpts()
-
-  bool_ev = expr_eval.BoolEvaluator(mem, exec_opts, word_ev, arena)
-  try:
-    b = bool_ev.Eval(bool_node)
-  except util.FatalRuntimeError as e:
-    # e.g. [ -t xxx ]
-    # TODO: Printing the location would be nice.
-    util.error('test: %s', e.UserErrorString())
-    return 2  # because this is more like a parser error.
-
-  status = 0 if b else 1
-  return status
-
-
-if __name__ == '__main__':
-  # Test
-  e = _StringWordEmitter('-z X -o -z Y -a -z X'.split())
-  while True:
-    w = e.ReadWord(None)
-    print(w)
-    if w.id == Id.Eof_Real:
-      break
+    status = 0 if b else 1
+    return status

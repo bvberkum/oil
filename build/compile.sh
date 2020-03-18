@@ -6,6 +6,7 @@
 set -o nounset
 set -o pipefail
 set -o errexit
+shopt -s strict:all 2>/dev/null || true  # dogfood for OSH
 
 source build/common.sh
 
@@ -46,8 +47,11 @@ Python/random.c
 Python/structmember.c
 Python/sysmodule.c
 Python/traceback.c
-Python/ovm_stub_pystrtod.c
+Python/pystrtod.c
+Python/dtoa.c
+Python/pymath.c
 '
+# NOTE: pystrtod.c needs some floating point functions in pymath.c
 
 OBJECT_OBJS='
 Objects/abstract.c
@@ -96,7 +100,6 @@ Modules/gcmodule.c
 # signalmodule.c is specified in Modules/Setup.config, which comes from
 # 'configure' output.
 MODOBJS='
-Modules/posixmodule.c
 Modules/errnomodule.c
 Modules/pwdmodule.c
 Modules/_weakref.c
@@ -131,7 +134,15 @@ readonly PREPROC_FLAGS=(
 # NOTE: build/oil-defs is hard-coded to the oil.ovm app.  We're abandoning
 # hello.ovm and opy.ovm for now, but those can easily be added later.  We
 # haven't mangled the CPython source!
-readonly INCLUDE_PATHS=(-I . -I Include -I ../_devbuild/gen -I ../build/oil-defs)
+readonly INCLUDE_PATHS=(
+  -I .
+  -I Include
+  -I ../_devbuild/gen
+  -I ../build/oil-defs
+  -I ../py-yajl
+   # Note: This depends on build/dev.sh yajl-release
+  -I ../py-yajl/yajl/yajl-2.1.1/include
+)
 readonly CC=${CC:-cc}  # cc should be on POSIX systems
 
 # BASE_CFLAGS is copied by observation from what configure.ac does on my Ubuntu
@@ -150,18 +161,23 @@ readonly CC=${CC:-cc}  # cc should be on POSIX systems
 
 BASE_CFLAGS='-fno-strict-aliasing -fwrapv -Wall -Wstrict-prototypes'
 
-# This appears to work for Clang too!
+# These flags are disabled for OS X.  I would have thought it would work in
+# Clang?  It works with both GCC and Clang on Linux.
 # https://stackoverflow.com/questions/6687630/how-to-remove-unused-c-c-symbols-with-gcc-and-ld
-BASE_CFLAGS="$BASE_CFLAGS -fdata-sections -ffunction-sections"
+#BASE_CFLAGS="$BASE_CFLAGS -fdata-sections -ffunction-sections"
+
 # Needed after cpython-defs filtering.
 BASE_CFLAGS="$BASE_CFLAGS -Wno-unused-variable -Wno-unused-function"
 readonly BASE_CFLAGS
 
-BASE_LDFLAGS='-Wl,--gc-sections'
+BASE_LDFLAGS=''
+# Disabled for OS X
+# BASE_LDFLAGS='-Wl,--gc-sections'
 
 # The user should be able to customize CFLAGS, but it shouldn't disable what's
 # in BASE_CFLAGS.
 readonly CFLAGS=${CFLAGS:-}
+readonly LDFLAGS=${LDFLAGS:-}
 
 build() {
   local out=${1:-$PY27/ovm2}
@@ -191,14 +207,14 @@ build() {
     c_module_src_list=$(cat $abs_c_module_srcs)
 
     if [[ -n "$READLINE_DIR" ]]; then
-      readline_flags+="-L $READLINE_DIR/lib -I $READLINE_DIR/include"
+      readline_flags+="-L $READLINE_DIR/lib -I $READLINE_DIR/include "
     fi
 
     # NOTE: pyconfig.h has HAVE_LIBREADLINE but doesn't appear to use it?
     readline_flags+="-l readline -D HAVE_READLINE"
   else
     # don't fail
-    c_module_src_list=$(grep -v '/readline.c' $abs_c_module_srcs || true)
+    c_module_src_list=$(grep -E -v '/readline.c|/line_input.c' $abs_c_module_srcs || true)
   fi
 
   # $PREFIX comes from ./configure and defaults to /usr/local.
@@ -220,6 +236,7 @@ build() {
     Modules/ovm.c \
     -l m \
     ${BASE_LDFLAGS} \
+    ${LDFLAGS} \
     $readline_flags \
     "$@" \
     || true
@@ -350,13 +367,16 @@ make-tar() {
     INSTALL.txt \
     configure \
     install \
+    uninstall \
     Makefile \
+    doc/osh.1 \
     build/compile.sh \
     build/actions.sh \
     build/common.sh \
     build/detect-*.c \
     _build/$app_name/$bytecode_zip \
     _build/$app_name/*.c \
+    py-yajl/yajl/COPYING \
     $PY27/LICENSE \
     $PY27/Modules/ovm.c \
     $c_module_srcs \
@@ -396,4 +416,6 @@ count-c-lines() {
   popd
 }
 
-"$@"
+if test $(basename $0) = 'compile.sh'; then
+  "$@"
+fi

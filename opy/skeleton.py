@@ -1,14 +1,9 @@
-#!/usr/bin/python
 """
 skeleton.py: The compiler pipeline.
 """
 from __future__ import print_function
 
 import cStringIO
-
-from .pgen2 import tokenize
-from .pgen2 import driver
-from .pgen2 import parse
 
 from .compiler2 import future
 from .compiler2 import pyassem
@@ -17,6 +12,9 @@ from .compiler2 import syntax
 from .compiler2 import symbols
 from .compiler2 import transformer
 
+from pgen2 import tokenize
+from pgen2 import driver
+from pgen2 import parse
 
 
 def _PrintScopes(scopes):
@@ -38,21 +36,23 @@ class _ModuleContext(object):
     self.futures = futures
 
 
-# Emulating parser.st structures from parsermodule.c.
-# They have a totuple() method, which outputs tuples like this.
-def py2st(unused_gr, raw_node):
-  typ, value, context, children = raw_node
-  # See pytree.Leaf
-  if context:
-    _, (lineno, column) = context
+def _ParseTreeToTuples(pnode):
+  """
+  parser.st objects from parsermodule.c have a totuple() method, which outputs
+  tuples like this.  The original "compiler2" module expected this format, but
+  the original pgen2 produced a different format.
+  """
+  if pnode.tok:
+    value, _, (lineno, column) = pnode.tok  # opaque
   else:
-    lineno = 0  # default in Leaf
+    value = None
+    lineno = 0
     column = 0
 
-  if children:
-    return (typ,) + tuple(children)
+  if pnode.children:
+    return (pnode.typ,) + tuple(_ParseTreeToTuples(p) for p in pnode.children)
   else:
-    return (typ, value, lineno, column)
+    return (pnode.typ, value, lineno, column)
 
 
 class StringInput(object):
@@ -106,7 +106,7 @@ def Compile(f, opt, gr, mode, print_action=None):
 
   tokens = tokenize.generate_tokens(f.readline)
 
-  p = parse.Parser(gr, convert=py2st)
+  p = parse.Parser(gr)
   if mode == 'single':
     start_symbol = 'single_input'
   elif mode == 'exec':
@@ -114,10 +114,12 @@ def Compile(f, opt, gr, mode, print_action=None):
   elif mode == 'eval':
     start_symbol = 'eval_input'
 
-  parse_tree = driver.PushTokens(p, tokens, gr.symbol2number[start_symbol])
+  parse_tree = driver.PushTokens(p, tokens, gr, start_symbol)
+
+  parse_tuples = _ParseTreeToTuples(parse_tree)
 
   tr = transformer.Transformer()
-  as_tree = tr.transform(parse_tree)
+  as_tree = tr.transform(parse_tuples)
 
   if print_action == 'ast':
       print(as_tree)

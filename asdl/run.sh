@@ -11,67 +11,20 @@ set -o errexit
 
 source build/common.sh  # for clang
 
-export PYTHONPATH=.
+export PYTHONPATH='.:vendor/'
 
-asdl-arith-encode() {
-  local expr="$1"
-  local out=${2:-_tmp/arith.bin}
-  asdl/asdl_demo.py arith-encode "$expr" $out
-  echo
-
-  ls -l $out
-  #hexdump -C $out
-  xxd $out
-  echo
-}
-
-asdl-arith-format() {
-  local expr="$1"
-  asdl/asdl_demo.py arith-format "$expr"
-}
-
-asdl-py() {
-  local schema=$1
-  asdl/asdl_demo.py py $schema
-}
-
-smoke-test() {
-  local arith_expr=${1:-"2 + 3 * 4"}
-  # Print Schema (asdl_.py, py_meta.py)
-  asdl-py asdl/arith.asdl
-
-  # Parse real values and pretty print (format.py)
-  asdl-arith-format "$arith_expr"
-
-  # encode.py
-  asdl-arith-oheap "$arith_expr"
-}
-
-asdl-cpp() {
-  local schema=${1:-asdl/arith.asdl}
-  local src=${2:-_tmp/arith.asdl.h}
-  asdl/gen_cpp.py cpp $schema > $src
-  ls -l $src
-  wc -l $src
-}
-
-py-cpp() {
-  local schema=${1:-asdl/arith.asdl}
-  asdl-py $schema
-  asdl-cpp $schema _tmp/$(basename $schema).h
-}
-
-gen-python() {
-  local schema=$1
-  local name=$(basename $schema .asdl)
-  core/asdl_gen.py py $schema _devbuild/${name}_asdl.pickle
-}
-
-gen-demo-asdl() {
-  local out=_devbuild/gen/demo_asdl.py
-  touch _tmp/__init__.py
-  gen-python asdl/demo.asdl > $out
+gen-mypy-asdl() {
+  local name=$1
+  shift
+  local out=_devbuild/gen/${name}_asdl.py
+  asdl/tool.py mypy asdl/${name}.asdl "$@" > $out
   wc -l $out
+}
+
+gen-typed-demo-asdl() { gen-mypy-asdl typed_demo; }
+gen-shared-variant-asdl() { gen-mypy-asdl shared_variant; }
+gen-typed-arith-asdl() {
+  gen-mypy-asdl typed_arith 'asdl.typed_arith_abbrev'
 }
 
 unit() {
@@ -79,7 +32,7 @@ unit() {
   #test/unit.sh unit asdl/arith_ast_test.py
 
   # This test is for the metadata
-  ASDL_TYPE_CHECK=1 PYTHONPATH=. asdl/arith_generated_test.py "$@"
+  PYTHONPATH=. asdl/arith_generated_test.py "$@"
 }
 
 #
@@ -97,7 +50,7 @@ cxx() {
   #local CXX=c++ 
   local CXX=$CLANGXX
   local opt_flag='-O2'
-  local opt_flag='-O0'
+  #local opt_flag='-O0'
 
   # -Winline
   # http://stackoverflow.com/questions/10631283/how-will-i-know-whether-inline-function-is-actually-replaced-at-the-place-where
@@ -124,45 +77,6 @@ build-demo() {
   cxx -I _tmp -o $bin asdl/${name}_demo.cc
 
   chmod +x $bin
-}
-
-asdl-arith-oheap() {
-  local arith_expr=${1:-"1 + 2 * 3"}
-  local name=arith
-  local data=_tmp/${name}.bin
-
-  # Write a binary
-  asdl-arith-encode "$arith_expr" $data
-
-  local bin=_tmp/${name}_demo 
-
-  build-demo asdl/arith.asdl
-
-  set -x
-  #gdb-trace $bin $data
-  $bin $data 
-}
-
-# TODO: How big is oheap vs. the virtual memory size?
-
-osh-demo() {
-  local name=osh
-  local data=_tmp/${name}.bin
-
-  local code='echo hi; echo bye  # comment' 
-  local code='declare -r -x foo'  # for testing repeated array
-  local code='echo x && echo y && echo z || die'  # for && || chains
-  #local code='echo $(( 2 + 3 ))'
-  #local code='echo $(( -2 * -3 ))'  # test negative integers
-  bin/osh -n --ast-format oheap -c "$code" > $data
-
-  ls -l $data
-
-  core/id_kind_gen.py cpp > _tmp/id_kind.h
-  build-demo osh/osh.asdl
-
-  local bin=_tmp/${name}_demo 
-  $bin $data
 }
 
 a2() {
@@ -240,6 +154,38 @@ compare-opts() {
     llvm $opt
   done
   opt-stats
+}
+
+regress() {
+  bin/osh -n configure > _tmp/configure-tree-abbrev.txt
+  bin/osh --ast-format text -n configure > _tmp/configure-tree-full.txt
+  { wc -l _tmp/configure*.txt
+    md5sum _tmp/configure*.txt
+  } #| tee _tmp/gold.txt
+}
+
+# To check if the lines go over 100 characters.
+line-length-hist() {
+  for f in _tmp/configure*.txt; do
+    echo $f
+    awk '{ print length($0) } ' $f | sort -n | uniq -c | tail 
+  done
+}
+
+gen-cpp-demo() {
+  local out=_tmp/typed_arith.asdl.h
+  asdl/tool.py cpp asdl/typed_arith.asdl > $out
+
+  local out2=_tmp/typed_demo.asdl.h
+  asdl/tool.py cpp asdl/typed_demo.asdl > $out2
+
+  wc -l $out $out2
+
+  local bin=_tmp/typed_arith_demo 
+  # uses typed_arith_asdl.h, runtime.h, hnode_asdl.h
+  $CLANGXX -Wall -std=c++11 -I _tmp -I mycpp -I _devbuild/gen-cpp \
+    -o $bin asdl/typed_arith_demo.cc
+  $bin
 }
 
 "$@"

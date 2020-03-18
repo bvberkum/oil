@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Copyright 2016 Andy Chu. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -9,64 +8,61 @@
 reader.py - Read lines of input.
 """
 
-import cStringIO
-import sys
+from mycpp import mylib
 
-from core import util
-log = util.log
+from core.util import p_die
+
+from typing import Optional, Tuple, List, Union, IO, TYPE_CHECKING
+if TYPE_CHECKING:
+  from _devbuild.gen.syntax_asdl import Token
+  from core.alloc import Arena
 
 
 class _Reader(object):
   def __init__(self, arena):
+    # type: (Arena) -> None
     self.arena = arena
     self.line_num = 1  # physical line numbers start from 1
 
+  def _GetLine(self):
+    # type: () -> Optional[str]
+    raise NotImplementedError()
+
   def GetLine(self):
+    # type: () -> Tuple[int, Optional[str], int]
     line = self._GetLine()
     if line is None:
-      return -1, None, 0
+      eof_line = None  # type: Optional[str]
+      return -1, eof_line, 0
 
-    if self.arena:
-      line_id = self.arena.AddLine(line, self.line_num)
-    else:
-      line_id = -1
+    line_id = self.arena.AddLine(line, self.line_num)
     self.line_num += 1
     return line_id, line, 0
 
   def Reset(self):
-    # Should never be called?
+    # type: () -> None
+    """Called after command execution in main_loop.py."""
     pass
 
 
-_PS2 = '> '
+class DisallowedLineReader(_Reader):
+  """For CommandParser in Oil expressions."""
 
-class InteractiveLineReader(_Reader):
-  def __init__(self, arena, prompt):
-    _Reader.__init__(self, arena)
-    self.prompt = prompt
-    self.prompt_str = ''
-    self.Reset()  # initialize self.prompt_str
+  def __init__(self, arena, blame_token):
+    # type: (Arena, Token) -> None
+    _Reader.__init__(self, arena)  # TODO: This arena is useless
+    self.blame_token = blame_token
 
   def _GetLine(self):
-    sys.stderr.write(self.prompt_str)
-    try:
-      ret = raw_input('') + '\n'  # newline required
-    except EOFError:
-      ret = None
-    self.prompt_str = _PS2  # TODO: Do we need $PS2?  Would be easy.
-    return ret
-
-  def Reset(self):
-    """Call this after command execution, to free memory taken up by the lines,
-    and reset prompt string back to PS1.
-    """
-    self.prompt_str = self.prompt.FirstPrompt()
+    # type: () -> Optional[str]
+    p_die("Here docs aren't allowed in expressions", token=self.blame_token)
 
 
 class FileLineReader(_Reader):
   """For -c and stdin?"""
 
   def __init__(self, f, arena):
+    # type: (mylib.LineReader, Arena) -> None
     """
     Args:
       lines: List of (line_id, line) pairs
@@ -75,25 +71,20 @@ class FileLineReader(_Reader):
     self.f = f
 
   def _GetLine(self):
+    # type: () -> Optional[str]
     line = self.f.readline()
-    if not line:
+    if len(line) == 0:
       return None
 
     return line
 
 
 def StringLineReader(s, arena):
-  return FileLineReader(cStringIO.StringIO(s), arena)
+  # type: (str, Arena) -> FileLineReader
+  return FileLineReader(mylib.BufLineReader(s), arena)
 
-
-# C++ ownership notes:
-# - used for file input (including source)
-# - used for -c arg (NUL terminated, likely no newline)
-# - used for eval arg
-# - for here doc?
-#
-# Adding \n causes problems for StringPiece.  Maybe we an just copy it
-# internally.
+# TODO: Should be BufLineReader(Str)?
+# This doesn't have to copy.  It just has a pointer.
 
 
 class VirtualLineReader(_Reader):
@@ -103,6 +94,7 @@ class VirtualLineReader(_Reader):
   """
 
   def __init__(self, lines, arena):
+    # type: (List[Tuple[int, str, int]], Arena) -> None
     """
     Args:
       lines: List of (line_id, line) pairs
@@ -113,8 +105,11 @@ class VirtualLineReader(_Reader):
     self.pos = 0
 
   def GetLine(self):
+    # type: () -> Tuple[int, Optional[str], int]
     if self.pos == self.num_lines:
-      return -1, None, 0
+      eof_line = None  # type: Optional[str]
+      return -1, eof_line, 0
+
     line_id, line, start_offset = self.lines[self.pos]
 
     self.pos += 1

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """
 glob_test.py: Tests for glob.py
 """
@@ -15,7 +15,7 @@ class GlobEscapeTest(unittest.TestCase):
 
   def testEscapeUnescape(self):
     esc = glob_.GlobEscape
-    unesc = glob_._GlobUnescape
+    unesc = glob_.GlobUnescape
 
     pairs = [
         (r'\*.py', '*.py'),
@@ -34,6 +34,7 @@ class GlobEscapeTest(unittest.TestCase):
     #   $ shopt -s nullglob; argv [][  # is a glob
     CASES = [
         (r'[]', True),
+        (r'[a]', True),
         (r'[][', True),
         (r'][', False),  # no balanced pair
         (r'\[]', False),  # no balanced pair
@@ -94,8 +95,8 @@ class GlobEscapeTest(unittest.TestCase):
 
 
 def _ReadTokens(s):
-  lex = match.GLOB_LEXER
-  return list(lex.Tokens(s))
+  lex = match.GlobLexer(s)
+  return list(lex.Tokens())
 
 
 class GlobParserTest(unittest.TestCase):
@@ -103,7 +104,7 @@ class GlobParserTest(unittest.TestCase):
   def testGlobLexer(self):
     print(_ReadTokens(''))
     print(_ReadTokens('*.py'))
-    print(_ReadTokens('\*.py'))
+    print(_ReadTokens(r'\*.py'))
     print(_ReadTokens('[abc]'))
     print(_ReadTokens('\\'))  # Enf
     print(_ReadTokens('\\x'))
@@ -114,37 +115,37 @@ class GlobParserTest(unittest.TestCase):
   def testGlobParser(self):
     CASES = [
         # (glob input, expected AST, expected extended regexp, has error)
-        ('*.py', '.*\.py', False),
-        ('*.?', '.*\..', False),
-        ('<*>', '<.*>', False),
-        ('\**+', '\*.*\+', False),
-        ('\**', '\*.*', False),
-        ('*.[ch]pp', '.*\.[ch]pp', False),
+        ('*.py', r'.*\.py', False),
+        ('*.?', r'.*\..', False),
+        ('<*>', r'<.*>', False),
+        ('\**+', r'\*.*\+', False),
+        ('\**', r'\*.*', False),
+        ('*.[ch]pp', r'.*\.[ch]pp', False),
 
         # not globs
-        ('abc', None, False),
-        ('\\*', None, False),
-        ('c:\\foo', None, False),
-        ('strange]one', None, False),
+        ('abc', 'abc', False),
+        ('\\*', '\\*', False),
+        ('c:\\foo', 'c:foo', False),
+        ('strange]one', 'strange\\]one', False),
 
         # character class globs
         ('[[:space:]abc]', '[[:space:]abc]', False),
         ('[abc]', '[abc]', False),
         (r'[\a\b\c]', r'[\a\b\c]', False),
-        ('[abc\[]', '[abc\[]', False),
+        ('[abc\[]', r'[abc\[]', False),
         ('[!not]', '[^not]', False),
         ('[^also_not]', '[^also_not]', False),
         ('[!*?!\\[]', '[^*?!\\[]', False),
-        ('[!\]foo]', '[^\]foo]', False),
+        ('[!\]foo]', r'[^\]foo]', False),
 
         # invalid globs
-        ('not_closed[a-z', None, True),
-        ('[[:spa[ce:]]', None, True),
+        ('not_closed[a-z', 'not_closed\\[a-z', True),
+        ('[[:spa[ce:]]', '\\[\\[:spa\\[ce:\\]\\]', True),
 
         # Regression test for IndexError.
-        ('[', None, True),
-        ('\\', None, True),
-        (']', None, False),
+        ('[', '\\[', True),
+        ('\\', '\\\\', True),
+        (']', '\\]', False),
     ]
     for glob, expected_ere, expected_err in CASES:
       print('===')

@@ -1,9 +1,11 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 from __future__ import print_function
 """
 c_module_srcs.py
 """
 
+import os
+import glob
 import sys
 
 
@@ -26,9 +28,12 @@ def main(argv):
 
       # Hard-coded special cases for now.
 
-      if mod_name in ('libc', 'fastlex'):  # Our own modules
+      if mod_name in ('libc', 'fastlex', 'line_input'):  # Our own modules
         # Relative to Python-2.7.13 dir
         print('../native/%s.c' % mod_name)
+
+      elif mod_name == 'posix_':
+        print('../native/posixmodule.c')
 
       elif mod_name == 'math':
         print('Modules/mathmodule.c')
@@ -57,6 +62,21 @@ def main(argv):
         print('Modules/_io/_iomodule.c')
         print('Modules/_io/stringio.c')
         print('Modules/_io/textio.c')
+
+      elif mod_name == 'yajl':
+        # Not including headers
+        globs = [
+            'py-yajl/*.c',
+            'py-yajl/yajl/src/*.c',
+        ]
+        paths = []
+        for g in globs:
+          paths.extend(glob.glob(g))
+        for path in paths:
+          # UNUSED file.  It's an optional layer on top.
+          if os.path.basename(path) == 'yajl_tree.c':
+            continue
+          print('../' + path)
 
       else:
         print(manifest[mod_name])

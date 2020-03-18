@@ -1,16 +1,32 @@
 #!/bin/bash
 #
+# The big Oil release process.
+#
 # Usage:
-#   scripts/release.sh <function name>
+#   devtools/release.sh <function name>
 #
 # Steps:
-#   build/doc.sh update-src-versions  (optional)
-#   $0 build-and-test  (builds tarball, runs unit,gold, initial spec tests, etc.)
+#   edit oil-version.txt and build/doc.sh update-src-versions
+#   $0 make-release-branch
+#   build/dev.sh yajl-release
+#   $0 quick-oil-tarball     # build FIRST tarball
+#   build/test.sh oil-tar T  # extract, build, install
+#                            # for cpython-defs source scanning and dogfood
+#   demo/osh-debug.sh osh-for-release: Start a shell to dogfood
+#   opy/regtest.sh verify-golden, because that one tends to be flaky
+#   build/cpython-defs.sh {oil-py-names,filter-methods}
+#     (regenerate C source)
+#
+# Shortcut for below: $0 auto-machine1
+#
+#   $0 build-and-test  # build FINAL tarball, run unit/osh2oil suites, etc.
 #     prereq: build/codegen.sh {download,install}-re2c
-#   test/wild.sh all (3-4 minutes on fast machine)
+#     test/gold.sh run-for-release (outside OSH_HIJACK_SHEBANG)
+#   [switch benchmarks-data repo] commit src/oil-native-* and push to flanders.
+#   $0 metrics  # this can catch bugs, operates on FINAL tarball
+#   test/wild.sh all (3-4 minutes on fast machine, outside OSH_HIJACK_SHEBANG)
 #   $0 test-opy (2 minutes on fast machine)
-#   $0 spec-all  # tests 3 OSH binaries
-#   $0 metrics
+#   $0 spec-all  # tests 2 OSH binaries
 #   benchmarks:
 #     Sync up oilshell/benchmark-data repo.
 #     flanders: $0 benchmark-build, then $0 benchmark-run
@@ -19,45 +35,61 @@
 #       - benchmarks/osh-runtime.sh {download,extract}
 #       - benchmarks/ovm-build.sh {download,extract-oil,extract-other}
 #       - build/codegen.sh {download,extract}-clang (for OVM build benchmarks)
-#     lisa: $0 benchmark-run, then $0 benchmark-run-on-1-machine (oheap)
+#     lisa: $0 benchmark-run
 #     Commit files to oilshell/benchmark-data repo and sync.
 #   benchmarks/report.sh all
+#   $0 deploy-tar  # needed to checksum
 #   $0 build-tree
 #   $0 compress
 #   devtools/release-version.sh git-changelog-$VERSION
 #   devtools/release-version.sh announcement-$VERSION
 #   MAYBE: ./local.sh test-release-tree if you want to preview it
-#   $0 sync-old-tar (for releases.html)
-#   $0 deploy-tar
-#   $0 deploy-doc
+#   $0 deploy-doc (makes releases.html)
+#
+#   demo/osh-debug.sh analyze  # see what you ran
 # 
 # - Go to oilshell.org__deploy and "git add release/$VERSION".
-# - Go to oilshell.org repo and do ./deploy.sh all.
+# - Go to oilshell.org repo and do:
+#   ./deploy.sh bump-index-version
+#   make
+#   ./deploy.sh site
+#   ./deploy.sh bump-release-version
 
 set -o nounset
 set -o pipefail
 set -o errexit
 
+shopt -s strict:all 2>/dev/null || true  # dogfood for OSH
+
 readonly OIL_VERSION=$(head -n 1 oil-version.txt)
 
-# Dir is defined in build/test.sh.
-readonly OSH_RELEASE_BINARY=_tmp/oil-tar-test/oil-$OIL_VERSION/_bin/osh
+readonly REPO_ROOT=$(cd $(dirname $0)/..; pwd)
 
-source devtools/common.sh  # html-footer
-source opy/common.sh  # For OSH_BYTERUN
+# Dir is defined in build/test.sh.
+readonly OSH_RELEASE_BINARY=$REPO_ROOT/_tmp/oil-tar-test/oil-$OIL_VERSION/_bin/osh
+readonly OIL_RELEASE_BINARY=$REPO_ROOT/_tmp/oil-tar-test/oil-$OIL_VERSION/_bin/oil
+
+source devtools/common.sh  # banner
 
 log() {
   echo "$@" 1>&2
+}
+
+make-release-branch() {
+  git checkout master
+  local name=release/$OIL_VERSION
+  git checkout -b $name
+  git push -u origin $name
 }
 
 # For redoing a release.  This is everything until you have to 'git pull' the
 # benchmark-data repo to make reports.
 auto-machine1() {
   $0 build-and-test
+  $0 metrics  # this can catch bugs
   test/wild.sh all
   $0 test-opy
   $0 spec-all
-  $0 metrics
   $0 benchmark-run
   #$0 benchmark-run-on-1-machine
 }
@@ -67,7 +99,6 @@ auto-machine1() {
 
 # oilshell.org__deploy/
 #   releases.html
-#   opy-releases.html  (later)
 #   release/
 #     $VERSION/
 #       index.html  # release page, from doc/release-index.md
@@ -76,8 +107,8 @@ auto-machine1() {
 #       announcement.html  # HTML redirect
 #       changelog.html
 #       doc/
-#         INSTALL.html
-#         osh-quick-ref.html
+#         index.html
+#         ...
 #       test/  # results
 #         spec.wwz/
 #           machine-lisa/
@@ -118,7 +149,7 @@ auto-machine1() {
 _clean-tmp-dirs() {
   rm -r -f \
     _tmp/{spec,unit,gold,parse-errors,osh2oil,wild/www} \
-    _tmp/metrics \
+    _tmp/{metrics,important-source-code} \
     _tmp/opy-test \
     _tmp/{osh-parser,osh-runtime,vm-baseline,ovm-build,oheap} \
     _tmp/oil-tar-test
@@ -145,16 +176,20 @@ _release-build() {
   build/test.sh oil-tar
 
   ln -s -f --no-target-directory -v oil.ovm $OSH_RELEASE_BINARY
+  ln -s -f --no-target-directory -v oil.ovm $OIL_RELEASE_BINARY
+}
 
-  # TODO: Move these?
+# Run this after manually removing symbols from CPython.
+release-build-and-spec() {
+  # We need _clean to prevent stale files, and _dev-build too.  Dependencies
+  # are all messed up.
 
-  # _pending/oil-alpha1
-  # _tmp/pending/
-  #    oil-0.5.alpha2.tar.gz
-  #    osh ->
-  #    oil-0.5.alpha2/
-  #      _bin/
-  #         oil.ovm
+  _clean
+  _dev-build
+  _release-build
+  export OSH_LIST="$OSH_RELEASE_BINARY" OIL_LIST="$OIL_RELEASE_BINARY"
+  #test/spec.sh osh-all
+  test/spec.sh oil-all
 }
 
 readonly HAVE_ROOT=1
@@ -163,6 +198,7 @@ readonly -a OTHER_TESTS=(
   gold 
   osh2oil 
   parse-errors runtime-errors
+  oil-runtime-errors
   arena
   osh-usage oshc-deps
   opyc
@@ -170,6 +206,25 @@ readonly -a OTHER_TESTS=(
 
 run-other-tests() {
   for name in "${OTHER_TESTS[@]}"; do
+    case $name in
+      gold)
+        if test -n "${OSH_HIJACK_SHEBANG:-}"; then
+          cat >&2 <<'EOF'
+=====
+WARNING: Skipping gold tests because $OSH_HIJACK_SHEBANG is set.'
+Run them manually with:
+
+  test/gold.sh run-for-release
+=====
+EOF
+        fi
+        continue
+        ;;
+      *)
+        banner "Test suite: $name"
+        ;;
+    esac
+
     test/$name.sh run-for-release
   done
 }
@@ -188,8 +243,11 @@ _test-release-build() {
 
   run-other-tests
 
-  # Just test the release build (not under CPython or byterun.  That comes later.)
-  OSH_LIST="$OSH_RELEASE_BINARY" test/spec.sh all
+  # Just test the release build (as opposed to Oil under CPython, which comes
+  # later.)
+  export OSH_LIST="$OSH_RELEASE_BINARY" OIL_LIST="$OIL_RELEASE_BINARY"
+  test/spec.sh osh-all
+  test/spec.sh oil-all
 }
 
 # NOTE: Following opy/README.md.  Right now this is a quick and dirty
@@ -217,11 +275,6 @@ test-opy() {
   time ./test.sh gold > $out/$step.txt 2>&1
   echo $?
 
-  step='test-oil-unit-byterun'
-  echo "--- $step ---"
-  time ./test.sh oil-unit-byterun > $out/$step.txt 2>&1
-  echo $?
-
   # NOTE: This is sensitive to Python 2.7.12 vs .13 vs .14.  Ideally we would
   # remove that.
   # NOTE: There is no indication if this fails!
@@ -232,17 +285,52 @@ test-opy() {
 }
 
 spec-all() {
-  OSH_LIST="bin/osh $OSH_RELEASE_BINARY $OSH_BYTERUN" test/spec.sh all
+  ### Run all spec tests
+
+  # TODO: Look at task files and fail all are green and red.  See
+  # 'test/spec-runner.sh all-parallel'.
+
+  # Create the tests we're running
+  test/smoosh.sh make-spec
+
+  # 8/2019: Added smoosh
+  export OSH_LIST="$REPO_ROOT/bin/osh $OSH_RELEASE_BINARY"
+  export OIL_LIST="$REPO_ROOT/bin/oil $OIL_RELEASE_BINARY"
+  test/spec.sh all-and-smoosh
 }
 
+# For quickly debugging failures that don't happen in dev mode.
+spec-one() {
+  export OSH_LIST="$REPO_ROOT/bin/osh $OSH_RELEASE_BINARY"
+  export OIL_LIST="$REPO_ROOT/bin/oil $OIL_RELEASE_BINARY"
+  test/spec.sh "$@"
+}
 
-# TODO: Log this whole thing?  Include logs with the /release/ page?
 build-and-test() {
-  # 5 steps: clean, dev build, unit tests, release build, end-to-end tests.
+  ### Build tarballs and test them.  And preliminaries like unit tests.
+
+  # TODO: Log this whole thing?  Include logs with the /release/ page?
+
+  # Before doing anything
+  test/lint.sh travis
 
   _clean
   _dev-build
   test/unit.sh run-for-release
+
+  # oil-native
+  devtools/release-native.sh make-tar
+  devtools/release-native.sh extract-for-benchmarks
+
+  # This builds the tarball from _tmp/native-tar-test
+  devtools/release-native.sh test-tar
+
+  # For benchmarks
+  # This builds the tarball in ../benchmark-data.  (Could we combine these
+  # steps?)
+  _oil-native-build
+
+  # App bundle
   _release-build
   _test-release-build
 
@@ -256,6 +344,15 @@ _install() {
   sudo apt install python-dev
 }
 
+_oil-native-build() {
+  local dest="../benchmark-data/src/oil-native-$OIL_VERSION"
+  pushd $dest
+  build/mycpp.sh compile-oil-native-opt
+  # To run tests later
+  build/mycpp.sh compile-oil-native-asan
+  popd
+}
+
 # Run before benchmarks/auto.sh all.  We just build, and assume we tested.
 benchmark-build() {
   if test -n "$HAVE_ROOT"; then
@@ -263,6 +360,7 @@ benchmark-build() {
   fi
   _clean
   _dev-build
+  _oil-native-build
 
   _release-build
 }
@@ -272,10 +370,6 @@ benchmark-run() {
   OSH_OVM=$OSH_RELEASE_BINARY benchmarks/auto.sh all
 }
 
-benchmark-run-on-1-machine() {
-  OSH_OVM=$OSH_RELEASE_BINARY benchmarks/oheap.sh measure
-}
-
 _compressed-tarball() {
   local name=${1:-hello}
   local version=${2:-0.0.0}
@@ -283,8 +377,7 @@ _compressed-tarball() {
   local in=_release/$name.tar
   local out=_release/$name-$version.tar.gz
 
-  # Overwrite it to cause rebuild of oil.tar (_build/oil/bytecode.zip will be
-  # out of date.)
+  # Overwrite it to cause rebuild of oil.tar
   build/actions.sh write-release-date
 
   #make -d -r $in  # To debug
@@ -350,6 +443,12 @@ compress() {
   time zip -r -q $out .  # recursive, quiet
   popd
 
+  log "--- source-code"
+  local out="$root/source-code.wwz"
+  pushd _tmp/important-source-code
+  time zip -r -q $out .  # recursive, quiet
+  popd
+
   compress-benchmarks
 
   tree _release/VERSION
@@ -385,11 +484,12 @@ line-counts() {
   # Counting directly from the build.
   metrics/tarball.sh linecount-pydeps > $out/pydeps.txt
   metrics/tarball.sh linecount-nativedeps > $out/nativedeps.txt
+  metrics/tarball.sh linecount-oil-cpp > $out/oil-cpp.txt
 
   # My arbitrary categorization.
   metrics/source-code.sh all > $out/src.txt  # Count repo lines
 
-  metrics/source-code.sh oil-osh-cloc > $out/oil-osh-cloc.txt
+  metrics/source-code.sh osh-cloc > $out/osh-cloc.txt
 
   local opy_out=$out/opy.txt
   pushd opy
@@ -401,11 +501,17 @@ metrics() {
   local out=_tmp/metrics
   mkdir -p $out
 
+  # Generate C++ code that will be conuted later
+  build/dev.sh oil-asdl-to-cpp
+
   line-counts $PWD/$out/line-counts
 
   metrics/bytecode.sh run-for-release
   metrics/native-code.sh run-for-release
   build/cpython-defs.sh run-for-release
+
+  # For another .wwz file
+  build/doc.sh important-source-code
 
   tree $out
 }
@@ -424,18 +530,23 @@ copy-web() {
 }
 
 this-release-links() {
-  echo '<div style="margin-left: 2em;">'
-  echo '<table class="file-table">'
+  echo '<div class="file-table">'
+  echo '<table>'
   _tarball-links-row-html "$OIL_VERSION"
   echo '</table>'
   echo '</div>'
 }
 
 # Turn HTML comment into a download link
-add-download-links() {
-  awk -v snippet="$(this-release-links)" '
+add-date-and-links() {
+  awk -v date=$1 -v snippet="$(this-release-links)" '
     /<!-- REPLACE_WITH_DOWNLOAD_LINKS -->/ {
       print(snippet)
+      next
+    }
+
+    /<!-- REPLACE_WITH_DATE -->/ {
+      print(date)
       next
     }
 
@@ -444,13 +555,6 @@ add-download-links() {
   '
 }
 
-# TODO:
-# Test out web/ *.css,js,html
-# metrics/line-counts.wwz/
-#   src.txt
-#   pydeps.txt
-#   nativedeps.txt
-
 build-tree() {
   local root=_release/VERSION
   mkdir -p $root/{doc,test}
@@ -458,15 +562,15 @@ build-tree() {
   # Metadata
   cp -v _build/release-date.txt oil-version.txt $root
 
+  local release_date=$(cat _build/release-date.txt)
+
   # Docs
 
-  # NOTE: This action is also run in the build.  It generates code that goes in
-  # the binary.
-  build/doc.sh osh-quick-ref _release/VERSION
+  # Writes _release/VERSION and _tmp/release-index.html
+  build/doc.sh run-for-release
 
-  build/doc.sh install
-  build/doc.sh release-index _tmp/release-index.html
-  add-download-links < _tmp/release-index.html > $root/index.html
+  # Note: this truncates the date!
+  add-date-and-links $release_date < _tmp/release-index.html > $root/index.html
 
   # Problem: You can't preview it without .wwz!
   # Maybe have local redirects VERSION/test/wild/ to 
@@ -510,7 +614,8 @@ sync-old-tar() {
 deploy-tar() {
   mkdir -p $DOWNLOAD_DIR
 
-  cp -v _release/oil-$OIL_VERSION.tar.* $DOWNLOAD_DIR
+  # Also copy oil-native
+  cp -v _release/oil-*$OIL_VERSION.tar.* $DOWNLOAD_DIR
 
   ls -l $DOWNLOAD_DIR
 }
@@ -550,14 +655,21 @@ _tarball-links-row-html() {
 <tr class="file-table-heading">
   <td></td>
   <td>File / SHA256 checksum</td>
-  <td>Size</td>
+  <td class="size">Size</td>
   <td></td>
 </tr>
 EOF
 
-  for name in oil-$version.tar.{xz,gz}; do
+  # only release .xz for oil-native
+  for name in oil-$version.tar.{xz,gz} oil-native-$version.tar.xz; do
     local url="/download/$name"  # The server URL
     local path="../oilshell.org__deploy/download/$name"
+
+    # The native version might not exist
+    if [[ $name == oil-native-* && ! -f $path ]]; then
+      continue
+    fi
+
     local checksum=$(sha256sum $path | awk '{print $1}')
     local size=$(pretty-size $path)
 
@@ -637,8 +749,7 @@ _html-index() {
     <span class="version-number">$version</span>
   </td>
   <td>
-    <p>                <a href="release/$version/announcement.html">Release Announcement</a>
-       &nbsp; | &nbsp; <a href="release/$version/doc/INSTALL.html">INSTALL</a>
+    <p>                <a href="release/$version/announcement.html">Announcement</a>
        &nbsp; | &nbsp; <a href="release/$version/">Docs and Details</a>
     </p>
   </td>
@@ -661,43 +772,36 @@ EOF
 }
 
 _releases-html-header() {
+  # TODO: use html-head here, and publish web/*.css somewhere outside of
+  # /release/$VERSION/?  The list of all releases isn't versioned for obvious
+  # reasons.  Other docs are in the oilshell.org repo using the all-2020.css
+  # bundle.
+
   cat <<EOF
 <!DOCTYPE html>
 <html>
   <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Oil Releases</title>
     <style>
-      /* Make it centered and skinny for readability */
-      body {
-        margin: 0 auto;
-        width: 60em;
-      }
-      h1 {
-        text-align: center;
-      }
 EOF
 
+  cat web/base.css
   cat web/release-index.css
 
 cat <<EOF
-      /* Copied from oilshell.org bundle.css */
-      .date {
-        font-size: medium;
-        color: #555;
-        padding-left: 1em;
-      }
-      #home-link {
-        text-align: right;
+      h1 {
+        text-align: center;
       }
     </style>
   </head>
-  <body>
+  <body class="width50">
     <p id="home-link">
       <a href="/">oilshell.org</a>
     </p>
     <h1>Oil Releases</h1>
 
-    <table class="file-table">
+    <table class="release-table">
 EOF
 }
 
@@ -707,8 +811,15 @@ html-index() {
 
   { _releases-html-header
     _html-index $release_root_dir
-    html-footer
+
+    cat <<EOF
+    </table>
+  </body>
+</html>
+EOF
+
   } > $out
+
   ls -l $out
 }
 
@@ -718,6 +829,58 @@ tarball-size() {
   make _bin/oil.ovm-dbg  # faster way to build bytecode
   oil  # make tarball
   build/test.sh oil-tar  # Ctrl-C this, then run metrics/tarball.sh
+}
+
+tarball-build-deps() {
+  ### Tools and libs needed to build the tarball.
+
+  # On Travis, the _devbuild and _deps dirs should be cached.
+
+  if test -d _devbuild/cpython-full; then
+    echo '_devbuild/cpython-full exists: skipping build/prepare.sh'
+  else
+    build/prepare.sh configure
+    build/prepare.sh build-python
+  fi
+
+  if test -d _deps; then
+    echo '_deps exists: skipping re2c and cmark'
+  else
+    build/codegen.sh download-re2c
+    build/codegen.sh install-re2c
+
+    doctools/cmark.sh download
+    doctools/cmark.sh extract
+    doctools/cmark.sh build
+    doctools/cmark.sh make-symlink
+  fi
+}
+
+# This is a hack because the Makefile dependencies aren't correct.
+quick-oil-tarball() {
+  make clean-repo
+  make _bin/oil.ovm-dbg
+
+  local in=_release/oil.tar
+  local out=_release/oil-$OIL_VERSION.tar.gz
+
+  make $in
+  time gzip -c $in > $out
+  ls -l $out
+}
+
+upload-tmp() {
+  local tarball=$1
+  local user=$2
+
+  scp $tarball $user@oilshell.org:tmp/
+}
+
+sync-tmp() {
+  local user=$1
+  local dest=${2:-_tmp/candidates}
+  mkdir -p $dest
+  rsync --archive --verbose $user@oilshell.org:tmp/ $dest
 }
 
 "$@"

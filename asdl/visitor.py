@@ -1,8 +1,9 @@
-#!/usr/bin/python
 """
 visitor.py
 """
+from __future__ import print_function
 
+import sys
 from asdl import asdl_ as asdl
 
 
@@ -17,9 +18,18 @@ class AsdlVisitor:
   """
   def __init__(self, f):
     self.f = f
+    self.current_depth = 0  # the current number of indent levels
 
-  def Emit(self, s, depth, reflow=True):
-    for line in FormatLines(s, depth):
+  def Indent(self):
+    self.current_depth += 1
+
+  def Dedent(self):
+    self.current_depth -= 1
+
+  def Emit(self, s, depth=-1, reflow=True):
+    if depth == -1:
+      depth = self.current_depth
+    for line in FormatLines(s, depth, reflow=reflow):
       self.f.write(line)
 
   def VisitModule(self, mod):
@@ -78,7 +88,13 @@ def _ReflowLines(s, depth):
     # XXX this should be fixed for real
     if i == -1 and 'GeneratorExp' in cur:
       i = size + 3
-    assert i != -1, "Impossible line %d to reflow: %r" % (size, s)
+    if i == -1:
+      if 0:
+        print("Warning: No space to reflow line (size=%d, depth=%d, cur=%r): %r"
+              % (size, depth, cur, s), file=sys.stderr)
+      lines.append(padding + cur)
+      break
+
     lines.append(padding + cur[:i])
     if len(lines) == 1:
       # find new size based on brace

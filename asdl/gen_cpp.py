@@ -1,52 +1,58 @@
-#!/usr/bin/env python
 """
-asdl_cpp.py
-
-Turn an ASDL schema into C++ code.
+gen_cpp.py - Generate C++ classes from an ASDL schema.
 
 TODO:
-- Optional fields
-  - in osh, it's only used in two places:
-  - arith_expr? for slice length
-  - word? for var replace
-  - So you're already using pointers, can encode the NULL pointer.
 
-- Change everything to use references instead of pointers?  Non-nullable.
-- Unify ClassDefVisitor and MethodBodyVisitor.
-  - Whether you need a separate method body should be a flag.
-  - offset calculations are duplicated
-- generate a C++ pretty-printer
+- Integrate some of the lessons here:  
+  - https://github.com/oilshell/blog-code/tree/master/asdl
+  - And maybe mycpp/target_lang.cc
 
-Technically we don't even need alignment?  I guess the reason is to increase
-address space.  If 1, then we have 16MiB of code.  If 4, then we have 64 MiB.
+- pretty printing methods
+  - so asdl/format.py get translated?
 
-Everything is decoded on the fly, or is a char*, which I don't think has to be
-aligned (because the natural alignment woudl be 1 byte anyway.)
+- NoOp needs to be instantiated without args?
+- dict becomes Dict[str, str] ?
+- how to handle UserType(id) ?
+
+- How do optional ASDL values like int? work?  Use C++ default values?
+  - This means that all the optionals have to be on the end.  That seems OK.
+  - I guess that's how Python does it.
 """
 from __future__ import print_function
 
 import sys
 
-from asdl import asdl_ as asdl
-from asdl import front_end
-from asdl import runtime
+from collections import defaultdict
+
+from asdl import meta
 from asdl import visitor
+from core.util import log
 
-class ChainOfVisitors:
-  def __init__(self, *visitors):
-    self.visitors = visitors
+_ = log
 
-  def VisitModule(self, module):
-    for v in self.visitors:
-      v.VisitModule(module)
+
+# Used by core/asdl_gen.py to generate _devbuild/gen/osh-types.h, with
+# lex_mode__*
+class CEnumVisitor(visitor.AsdlVisitor):
+
+  def VisitSimpleSum(self, sum, name, depth):
+    # Just use #define, since enums aren't namespaced.
+    for i, variant in enumerate(sum.types):
+      self.Emit('#define %s__%s %d' % (name, variant.name, i + 1), depth)
+    self.Emit("", depth)
 
 
 _BUILTINS = {
-    'string': 'char*',  # A read-only string is a char*
+    'string': 'Str*',  # declared in mylib.h
     'int': 'int',
     'bool': 'bool',
-    'id': 'Id',  # Application specific hack for now
+    'any': 'void*',
+    # TODO: frontend/syntax.asdl should properly import id enum instead of
+    # hard-coding it here.
+    'id': 'Id_t',
+    'assoc': 'Dict<Str*, Str*>*',
 }
+
 
 class ForwardDeclareVisitor(visitor.AsdlVisitor):
   """Print forward declarations.
@@ -57,348 +63,508 @@ class ForwardDeclareVisitor(visitor.AsdlVisitor):
     self.Emit("class %(name)s_t;" % locals(), depth)
 
   def VisitProduct(self, product, name, depth):
-    self.Emit("class %(name)s_t;" % locals(), depth)
+    self.Emit("class %(name)s;" % locals(), depth)
 
   def EmitFooter(self):
     self.Emit("", 0)  # blank line
 
 
-class ClassDefVisitor(visitor.AsdlVisitor):
-  """Generate C++ classes and type-safe enums."""
+def _GetInnerCppType(type_lookup, field):
+  type_name = field.type
 
-  def __init__(self, f, enc_params, type_lookup, enum_types=None):
+  cpp_type = _BUILTINS.get(type_name)
+  if cpp_type is not None:
+    # We don't allow int? or Id? now.  Just reserve a Id.Unknown_Tok or -1.
+    if field.opt and not cpp_type.endswith('*'):
+      # e.g. Id_t*
+      # TODO: Use Id.Unknown_Tok for id?
+      # - use runtime.NO_STEP for int? step.  That could be ZERO?
+      # - although 5..6..0 is allowed.  Probabl -MAXINT
+      # Need to make sure int parsing doesn't overflow.
+      #raise AssertionError(field)
+      print('field %s' % field, file=sys.stderr)
+    return cpp_type
+
+  typ = type_lookup[type_name]
+  if isinstance(typ, meta.SumType):
+    if typ.is_simple:
+      # Use the enum instead of the class.
+      return "%s_e" % type_name
+    else:
+      # Everything is a pointer for now.  No references.
+      return "%s_t*" % type_name
+
+  return '%s*' % type_name
+
+
+class ClassDefVisitor(visitor.AsdlVisitor):
+  """Generate C++ declarations and type-safe enums."""
+
+  def __init__(self, f, type_lookup, e_suffix=True, pretty_print_methods=True,
+               simple_int_sums=None):
+
     visitor.AsdlVisitor.__init__(self, f)
-    self.ref_width = enc_params.ref_width
     self.type_lookup = type_lookup
-    self.enum_types = enum_types or {}
-    self.pointer_type = enc_params.pointer_type
-    self.footer = []  # lines
+    self.e_suffix = e_suffix
+    self.pretty_print_methods = pretty_print_methods
+    self.simple_int_sums = simple_int_sums or []
+
+    self._shared_type_tags = {}
+    self._product_counter = 1000  # start it high
+
+    self._products = []
+    self._product_bases = defaultdict(list)
 
   def _GetCppType(self, field):
     """Return a string for the C++ name of the type."""
-    type_name = field.type
 
-    cpp_type = _BUILTINS.get(type_name)
-    if cpp_type is not None:
-      return cpp_type
+    # TODO: The once instance of 'dict' needs an overhaul!
+    # Right now it's untyped in ASDL.
+    # I guess is should be Dict[str, str] for the associative array contents?
+    c_type = _GetInnerCppType(self.type_lookup, field)
+    if field.seq:
+      return 'List<%s>*' % c_type
+    else:
+      return c_type
 
-    typ = self.type_lookup.ByTypeName(type_name)
-    if isinstance(typ, asdl.Sum) and asdl.is_simple(typ):
-      # Use the enum instead of the class.
-      return "%s_e" % type_name
-
-    # - Pointer for optional type.
-    # - ints and strings should generally not be optional?  We don't have them
-    # in osh yet, so leave it out for now.
-    if field.opt:
-      return "%s_t*" % type_name
-
-    return "%s_t&" % type_name
-
-  def EmitFooter(self):
-    for line in self.footer:
-      self.f.write(line)
-
-  def _EmitEnum(self, sum, name, depth):
+  def _EmitEnum(self, sum, sum_name, depth, strong=False, is_simple=False):
     enum = []
-    for i in xrange(len(sum.types)):
-      type = sum.types[i]
-      enum.append("%s = %d" % (type.name, i + 1))  # zero is reserved
+    for i, variant in enumerate(sum.types):
+      if variant.shared_type:  # Copied from gen_python.py
+        tag_num = self._shared_type_tags[variant.shared_type]
+        # e.g. double_quoted may have base types expr_t, word_part_t
+        base_class = sum_name + '_t'
+        bases = self._product_bases[variant.shared_type]
+        if base_class in bases:
+          raise RuntimeError(
+              "Two tags in sum %r refer to product type %r" %
+              (sum_name, variant.shared_type))
+        else:
+          bases.append(base_class)
+      else:
+        tag_num = i + 1
+      enum.append((variant.name, tag_num))  # zero is reserved
 
-    self.Emit("enum class %s_e : uint8_t {" % name, depth)
-    self.Emit(", ".join(enum), depth + 1)
-    self.Emit("};", depth)
-    self.Emit("", depth)
+    if strong:
+      enum_name = '%s_e' % sum_name if self.e_suffix else sum_name
+
+      # Simple sum types can be STRONG since there's no possibility of multiple
+      # inheritance!
+
+      self.Emit('enum class %s {' % enum_name, depth)
+      for name, tag_num in enum:
+        self.Emit('%s = %d,' % (name, tag_num), depth + 1)
+      self.Emit('};', depth)
+
+      # type alias to match Python code
+      self.Emit('typedef %s %s_t;' % (enum_name, sum_name), depth)
+      self.Emit('', depth)
+
+      self.Emit('const char* %s_str(%s tag);' % (sum_name, enum_name), depth)
+      self.Emit('', depth)
+
+    else:
+      if is_simple:
+        enum_name = '%s_i' % sum_name if self.e_suffix else sum_name
+      else:
+        enum_name = '%s_e' % sum_name if self.e_suffix else sum_name
+
+      self.Emit('namespace %s {' % enum_name, depth)
+      for name, tag_num in enum:
+        self.Emit('const int %s = %d;' % (name, tag_num), depth + 1)
+
+      if is_simple:
+        # Help in sizing array.  Note that we're 1-based.
+        self.Emit('const int %s = %d;' % ('ARRAY_SIZE', len(enum) + 1),
+                  depth + 1)
+      self.Emit('};', depth)
+
+      self.Emit('', depth)
+
+      self.Emit('const char* %s_str(int tag);' % sum_name, depth)
+      self.Emit('', depth)
 
   def VisitSimpleSum(self, sum, name, depth):
-    self._EmitEnum(sum, name, depth)
+    if name in self.simple_int_sums:
+      self._EmitEnum(sum, name, depth, strong=False, is_simple=True)
+      self.Emit('typedef int %s_t;' % name)
+      self.Emit('')
+    else:
+      self._EmitEnum(sum, name, depth, strong=True)
 
-  def VisitCompoundSum(self, sum, name, depth):
+  def VisitCompoundSum(self, sum, sum_name, depth):
     # This is a sign that Python needs string interpolation!!!
     def Emit(s, depth=depth):
       self.Emit(s % sys._getframe(1).f_locals, depth)
 
-    self._EmitEnum(sum, name, depth)
+    self._EmitEnum(sum, sum_name, depth)
 
-    Emit("class %(name)s_t : public Obj {")
-    Emit(" public:")
-    # All sum types have a tag
-    Emit("%(name)s_e tag() const {", depth + 1)
-    Emit("return static_cast<%(name)s_e>(bytes_[0]);", depth + 2)
-    Emit("}", depth + 1)
-    Emit("};")
-    Emit("")
+    # TODO: DISALLOW_COPY_AND_ASSIGN on this class and others?
 
-    # TODO: This should be replaced with a call to the generic
-    # self.VisitChildren()
-    super_name = "%s_t" % name
-    for t in sum.types:
-      self.VisitConstructor(t, super_name, depth)
+    # This is the base class.
+    Emit('class %(sum_name)s_t {')
+    # Can't be constructed directly.  Note: this shows up in uftrace in debug
+    # mode, e.g. when we intantiate Token.  Do we need it?
+    Emit(' protected:')
+    Emit('  %s_t() {}' % sum_name)
+    Emit(' public:')
+    Emit('  int tag_() {')
+    # There's no inheritance relationship, so we have to reinterpret_cast.
+    Emit('    return reinterpret_cast<Obj*>(this)->tag;')
+    Emit('  }')
 
-    # rudimentary attribute handling
-    for field in sum.attributes:
-      type_name = str(field.type)
-      assert type_name in runtime.BUILTIN_TYPES, type_name
-      Emit("%s %s;" % (type_name, field.name), depth + 1)
+    if self.pretty_print_methods:
+      for abbrev in 'PrettyTree', '_AbbreviatedTree', 'AbbreviatedTree':
+        self.Emit('  hnode_t* %s();' % abbrev)
 
-  def VisitConstructor(self, cons, def_name, depth):
-    #print(dir(cons))
-    if cons.fields:
-      self.Emit("class %s : public %s {" % (cons.name, def_name), depth)
-      self.Emit(" public:", depth)
-      offset = 1  #  for the ID
-      for f in cons.fields:
-        self.VisitField(f, cons.name, offset, depth + 1)
-        offset += self.ref_width
-      self.Emit("};", depth)
-      self.Emit("", depth)
+    Emit('  DISALLOW_COPY_AND_ASSIGN(%(sum_name)s_t)')
+    Emit('};')
+    Emit('')
+
+    for variant in sum.types:
+      if variant.shared_type:
+        # Don't generate a class.
+        pass
+      else:
+        super_name = '%s_t' % sum_name
+        tag = 'static_cast<uint16_t>(%s_e::%s)' % (sum_name, variant.name)
+        class_name = '%s__%s' % (sum_name, variant.name)
+        self._GenClass(variant, sum.attributes, class_name, [super_name],
+                       depth, tag)
+
+    # Allow expr::Const in addition to expr__Const.
+    Emit('namespace %(sum_name)s {')
+    for variant in sum.types:
+      if not variant.shared_type:
+        variant_name = variant.name
+        Emit('  typedef %(sum_name)s__%(variant_name)s %(variant_name)s;')
+    Emit('}')
+    Emit('')
+
+  def _DefaultValue(self, field):
+    if field.seq:  # Array
+      default = 'new List<%s>()' % _GetInnerCppType(self.type_lookup, field)
+    else:
+      if field.type == 'int':
+        default = '-1'
+      elif field.type == 'id':  # hard-coded HACK
+        default = '-1'
+      elif field.type == 'bool':
+        default = 'false'
+      elif field.type == 'string':
+        default = 'new Str("")'
+      else:
+        field_desc = self.type_lookup[field.type]
+        if isinstance(field_desc, meta.SumType) and field_desc.is_simple:
+          # Just make it the first variant.  We could define "Undef" for
+          # each enum, but it doesn't seem worth it.
+          default = '%s_e::%s' % (field.type, field_desc.simple_variants[0])
+        else:
+          default = 'nullptr'
+    return default
+
+  def _GenClass(self, desc, attributes, class_name, base_classes, depth, tag):
+    """For Product and Constructor."""
+    if base_classes:
+      bases = ', '.join('public %s' % b for b in base_classes)
+      self.Emit("class %s : %s {" % (class_name, bases), depth)
+    else:
+      self.Emit("class %s {" % class_name, depth)
+    self.Emit(" public:", depth)
+
+    tag_init = 'tag(%s)' % tag
+    all_fields = desc.fields + attributes
+
+    if desc.fields:  # Don't emit for constructors with no fields
+      default_inits = [tag_init]
+      for field in all_fields:
+        default = self._DefaultValue(field)
+        default_inits.append('%s(%s)' % (field.name, default))
+
+      # Constructor with ZERO args
+      self.Emit("  %s() : %s {" %
+          (class_name, ', '.join(default_inits)), depth)
+      self.Emit("  }")
+
+    params = []
+    # All product types and variants have a tag
+    inits = [tag_init]
+
+    for f in desc.fields:
+      params.append('%s %s' % (self._GetCppType(f), f.name))
+      inits.append('%s(%s)' % (f.name, f.name))
+    for f in attributes:  # spids are initialized separately
+      inits.append('%s(%s)' % (f.name, self._DefaultValue(f)))
+
+    # Constructor with N args
+    self.Emit("  %s(%s) : %s {" %
+        (class_name, ', '.join(params), ', '.join(inits)), depth)
+    self.Emit("  }")
+
+    #
+    # Members
+    #
+    self.Emit('  uint16_t tag;')
+    for field in all_fields:
+      self.Emit("  %s %s;" % (self._GetCppType(field), field.name))
+
+    if self.pretty_print_methods:
+      for abbrev in 'PrettyTree', '_AbbreviatedTree', 'AbbreviatedTree':
+        self.Emit('  hnode_t* %s();' % abbrev, depth)
+
+    self.Emit('')
+    self.Emit('  DISALLOW_COPY_AND_ASSIGN(%s)' % class_name)
+    self.Emit('};', depth)
+    self.Emit('', depth)
 
   def VisitProduct(self, product, name, depth):
-    self.Emit("class %(name)s_t : public Obj {" % locals(), depth)
-    self.Emit(" public:", depth)
-    offset = 0
-    for f in product.fields:
-      type_name = '%s_t' % name
-      self.VisitField(f, type_name, offset, depth + 1)
-      offset += self.ref_width
+    self._shared_type_tags[name] = self._product_counter
+    # Create a tuple of _GenClass args to create LAST.  They may inherit from
+    # sum types that have yet to be defined.
+    self._products.append(
+        (product, product.attributes, name, depth, self._product_counter)
+    )
+    self._product_counter += 1
 
-    for field in product.attributes:
-      # rudimentary attribute handling
-      type_name = str(field.type)
-      assert type_name in runtime.BUILTIN_TYPES, type_name
-      self.Emit("%s %s;" % (type_name, field.name), depth + 1)
-    self.Emit("};", depth)
-    self.Emit("", depth)
+  def EmitFooter(self):
+    # Now generate all the product types we deferred.
+    for args in self._products:
+      desc, attributes, name, depth, tag_num = args
+      # Figure out base classes AFTERWARD.
+      bases = self._product_bases[name]
+      if not bases:
+        bases = ['Obj']
+      self._GenClass(desc, attributes, name, bases, depth, tag_num)
 
-  def VisitField(self, field, type_name, offset, depth):
-    """
-    Even though they are inline, some of them can't be in the class {}, because
-    static_cast<> requires inheritance relationships to be already declared.  We
-    have to print all the classes first, then all the bodies that might use
-    static_cast<>.
 
-    http://stackoverflow.com/questions/5808758/why-is-a-static-cast-from-a-pointer-to-base-to-a-pointer-to-derived-invalid
-    """
-    ctype = self._GetCppType(field)
-    name = field.name
-    pointer_type = self.pointer_type
-    # Either 'left' or 'BoolBinary::left', depending on whether it's inline.
-    # Mutated later.
-    maybe_qual_name = name
+class MethodDefVisitor(visitor.AsdlVisitor):
+  """Generate the body of pretty printing methods.
 
-    func_proto = None
-    func_header = None
-    body_line1 = None
-    inline_body = None
+  We have to do this in another pass because types and schemas have circular
+  dependencies.
+  """
+  def __init__(self, f, type_lookup, e_suffix=True, pretty_print_methods=True,
+               simple_int_sums=None):
+    visitor.AsdlVisitor.__init__(self, f)
+    self.type_lookup = type_lookup
+    self.e_suffix = e_suffix
+    self.pretty_print_methods = pretty_print_methods
+    self.simple_int_sums = simple_int_sums or []
 
-    if field.seq:  # Array/repeated
-      # For size accessor, follow the ref, and then it's the first integer.
-      size_header = (
-          'inline int %(name)s_size(const %(pointer_type)s* base) const {')
-      size_body = "return Ref(base, %(offset)d).Int(0);"
+  def _CodeSnippet(self, abbrev, field, desc, var_name):
+    none_guard = False
+    if isinstance(desc, meta.BoolType):
+      code_str = "new hnode__Leaf(%s ? runtime::TRUE_STR : runtime::FALSE_STR, color_e::OtherConst)" % var_name
 
-      self.Emit(size_header % locals(), depth)
-      self.Emit(size_body % locals(), depth + 1)
-      self.Emit("}", depth)
+    elif isinstance(desc, meta.IntType):
+      code_str = 'new hnode__Leaf(str(%s), color_e::OtherConst)' % var_name
 
-      ARRAY_OFFSET = 'int a = (index+1) * 3;'
-      A_POINTER = (
-          'inline const %(ctype)s %(maybe_qual_name)s('
-          'const %(pointer_type)s* base, int index) const')
+    elif isinstance(desc, meta.StrType):
+      code_str = 'runtime::NewLeaf(%s, color_e::StringConst)' % var_name
 
-      if ctype in ('bool', 'int'):
-        func_header = A_POINTER + ' {'
-        body_line1 = ARRAY_OFFSET
-        inline_body = 'return Ref(base, %(offset)d).Int(a);'
+    elif isinstance(desc, meta.AnyType):
+      # This is used for value.Obj().
+      code_str = 'new hnode__External(%s)' % var_name
 
-      elif ctype.endswith('_e') or ctype in self.enum_types:
-        func_header = A_POINTER + ' {'
-        body_line1 = ARRAY_OFFSET
-        inline_body = (
-            'return static_cast<const %(ctype)s>(Ref(base, %(offset)d).Int(a));')
+    elif isinstance(desc, meta.AssocType):
+      # TODO: Is this valid?
+      code_str = 'new hnode__External(%s)' % var_name
 
-      elif ctype == 'char*':
-        func_header = A_POINTER + ' {'
-        body_line1 = ARRAY_OFFSET
-        inline_body = 'return Ref(base, %(offset)d).Str(base, a);'
+    elif isinstance(desc, meta.UserType):
+      # TODO: Remove hard-coded Id?
+      code_str = 'new hnode__Leaf(new Str(Id_str(%s)), color_e::UserType)' % var_name
+      none_guard = True  # otherwise MyPy complains about foo.name
 
+    elif isinstance(desc, meta.SumType):
+      if desc.is_simple:
+        code_str = 'new hnode__Leaf(new Str(%s_str(%s)), color_e::TypeName)' % (
+            field.type, var_name)
+        none_guard = True  # otherwise MyPy complains about foo.name
       else:
-        # Write function prototype now; write body later.
-        func_proto = A_POINTER + ';'
+        code_str = '%s->%s()' % (var_name, abbrev)
+        none_guard = True
 
-        maybe_qual_name = '%s::%s' % (type_name, name)
-        func_def = A_POINTER + ' {'
-        # This static_cast<> (downcast) causes problems if put within "class
-        # {}".
-        func_body = (
-            'return static_cast<const %(ctype)s>('
-            'Ref(base, %(offset)d).Ref(base, a));')
+    elif isinstance(desc, meta.CompoundType):
+      code_str = '%s->%s()' % (var_name, abbrev)
+      none_guard = True
 
-        self.footer.extend(visitor.FormatLines(func_def % locals(), 0))
-        self.footer.extend(visitor.FormatLines(ARRAY_OFFSET, 1))
-        self.footer.extend(visitor.FormatLines(func_body % locals(), 1))
-        self.footer.append('}\n\n')
-        maybe_qual_name = name  # RESET for later
-
-    else:  # not repeated
-      SIMPLE = "inline %(ctype)s %(maybe_qual_name)s() const {"
-      POINTER = (
-          'inline const %(ctype)s %(maybe_qual_name)s('
-          'const %(pointer_type)s* base) const')
-
-      if ctype in ('bool', 'int'):
-        func_header = SIMPLE
-        inline_body = 'return Int(%(offset)d);'
-
-      elif ctype.endswith('_e') or ctype in self.enum_types:
-        func_header = SIMPLE
-        inline_body = 'return static_cast<const %(ctype)s>(Int(%(offset)d));'
-
-      elif ctype == 'char*':
-        func_header = POINTER + " {"
-        inline_body = 'return Str(base, %(offset)d);'
-
-      else:
-        # Write function prototype now; write body later.
-        func_proto = POINTER + ";"
-
-        maybe_qual_name = '%s::%s' % (type_name, name)
-        func_def = POINTER + ' {'
-        if field.opt:
-          func_body = (
-              'return static_cast<const %(ctype)s>(Optional(base, %(offset)d));')
-        else:
-          func_body = (
-              'return static_cast<const %(ctype)s>(Ref(base, %(offset)d));')
-
-        # depth 0 for bodies
-        self.footer.extend(visitor.FormatLines(func_def % locals(), 0))
-        self.footer.extend(visitor.FormatLines(func_body % locals(), 1))
-        self.footer.append('}\n\n')
-        maybe_qual_name = name  # RESET for later
-
-    if func_proto:
-      self.Emit(func_proto % locals(), depth)
     else:
-      self.Emit(func_header % locals(), depth)
-      if body_line1:
-        self.Emit(body_line1, depth + 1)
-      self.Emit(inline_body % locals(), depth + 1)
-      self.Emit("}", depth)
+      raise AssertionError(desc)
 
+    return code_str, none_guard
 
-# Used by osh/ast_gen.py
-class CEnumVisitor(visitor.AsdlVisitor):
+  def _EmitCodeForField(self, abbrev, field, counter):
+    """Generate code that returns an hnode for a field."""
+    out_val_name = 'x%d' % counter
+
+    desc = self.type_lookup[field.type]
+
+    if field.seq:
+      iter_name = 'i%d' % counter
+
+      self.Emit('  if (this->%s && len(this->%s)) {  // ArrayType' % (field.name, field.name))
+      self.Emit('    hnode__Array* %s = new hnode__Array(new List<hnode_t*>());' % out_val_name)
+      item_type = _GetInnerCppType(self.type_lookup, field)
+      self.Emit('    for (ListIter<%s>it(this->%s); !it.Done(); it.Next()) {'
+                % (item_type, field.name))
+      self.Emit('      %s %s = it.Value();' % (item_type, iter_name))
+      child_code_str, _ = self._CodeSnippet(abbrev, field, desc, iter_name)
+      self.Emit('      %s->children->append(%s);' % (out_val_name, child_code_str))
+      self.Emit('    }')
+      self.Emit('    L->append(new field(new Str("%s"), %s));' % (field.name, out_val_name))
+      self.Emit('  }')
+
+    elif field.opt:
+      self.Emit('  if (this->%s) {  // MaybeType' % field.name)
+      child_code_str, _ = self._CodeSnippet(abbrev, field, desc,
+                                            'this->%s' % field.name)
+      self.Emit('    hnode_t* %s = %s;' % (out_val_name, child_code_str))
+      self.Emit('    L->append(new field(new Str("%s"), %s));' % (field.name, out_val_name))
+      self.Emit('  }')
+
+    else:
+      var_name = 'this->%s' % field.name
+      code_str, obj_none_guard = self._CodeSnippet(abbrev, field, desc, var_name)
+
+      depth = self.current_depth
+      if obj_none_guard:  # to satisfy MyPy type system
+        pass
+      self.Emit('  hnode_t* %s = %s;' % (out_val_name, code_str), depth)
+
+      self.Emit('  L->append(new field(new Str("%s"), %s));' % (field.name, out_val_name), depth)
+
+  def _EmitPrettyPrintMethods(self, class_name, all_fields, desc):
+    if not self.pretty_print_methods:
+      return
+
+    pretty_cls_name = class_name.replace('__', '.')  # used below
+
+    #
+    # PrettyTree
+    #
+
+    # TODO: Create shared constants for the sum/variant names.  Both const
+    # char* and Str*.
+
+    self.Emit('')
+    self.Emit('hnode_t* %s::PrettyTree() {' % class_name)
+    self.Emit('  hnode__Record* out_node = runtime::NewRecord(new Str("%s"));' % pretty_cls_name)
+    if all_fields:
+      self.Emit('  List<field*>* L = out_node->fields;')
+
+    # Use the runtime type to be more like asdl/format.py
+    for local_id, field in enumerate(all_fields):
+      #log('%s :: %s', field_name, field_desc)
+      self.Indent()
+      self._EmitCodeForField('PrettyTree', field, local_id)
+      self.Dedent()
+      self.Emit('')
+    self.Emit('  return out_node;')
+    self.Emit('}')
+
+    #
+    # _AbbreviatedTree
+    #
+
+    self.Emit('')
+    self.Emit('hnode_t* %s::_AbbreviatedTree() {' % class_name)
+    self.Emit('  hnode__Record* out_node = runtime::NewRecord(new Str("%s"));' % pretty_cls_name)
+    if desc.fields:
+      self.Emit('  List<field*>* L = out_node->fields;')
+
+    # NO attributes in abbreviated version
+    for local_id, field in enumerate(desc.fields):
+      self.Indent()
+      self._EmitCodeForField('AbbreviatedTree', field, local_id)
+      self.Dedent()
+      self.Emit('')
+    self.Emit('  return out_node;')
+    self.Emit('}')
+    self.Emit('')
+
+    self.Emit('hnode_t* %s::AbbreviatedTree() {' % class_name)
+    abbrev_name = '_%s' % class_name
+
+    # STUB
+    self.abbrev_mod_entries = []
+
+    if abbrev_name in self.abbrev_mod_entries:
+      self.Emit('  hnode_t* p = %s();' % abbrev_name)
+      # If the user function didn't return anything, fall back.
+      self.Emit('  return p ? p : _AbbreviatedTree();')
+    else:
+      self.Emit('  return _AbbreviatedTree();')
+    self.Emit('}')
+
+  def _EmitStrFunction(self, sum, sum_name, depth, strong=False):
+    enum_name = '%s_e' % sum_name if self.e_suffix else sum_name
+
+    if strong:
+      self.Emit('const char* %s_str(%s tag) {' % (sum_name, enum_name), depth)
+    else:
+      self.Emit('const char* %s_str(int tag) {' % sum_name, depth)
+
+    self.Emit('  switch (tag) {', depth)
+    for variant in sum.types:
+      self.Emit('case %s::%s:' % (enum_name, variant.name), depth + 1)
+      self.Emit('  return "%s.%s";' % (sum_name, variant.name), depth + 1)
+
+    # NOTE: This happened in real life, maybe due to casting.  TODO: assert(0)
+    # instead?
+
+    self.Emit('default:', depth + 1)
+    self.Emit('  assert(0);', depth + 1)
+    
+    self.Emit('  }', depth)
+    self.Emit('}', depth)
 
   def VisitSimpleSum(self, sum, name, depth):
-    # Just use #define, since enums aren't namespaced.
-    for i, variant in enumerate(sum.types):
-      self.Emit('#define %s__%s %d' % (name, variant.name, i + 1), depth)
-    self.Emit("", depth)
+    if name in self.simple_int_sums:
+      self._EmitStrFunction(sum, name, depth, strong=False)
+    else:
+      self._EmitStrFunction(sum, name, depth, strong=True)
 
+  def VisitCompoundSum(self, sum, sum_name, depth):
+    self._EmitStrFunction(sum, sum_name, depth)
 
-def main(argv):
-  try:
-    action = argv[1]
-  except IndexError:
-    raise RuntimeError('Action required')
+    if not self.pretty_print_methods:
+      return
 
-  # TODO: Also generate a switch/static_cast<> pretty printer in C++!  For
-  # debugging.  Might need to detect cycles though.
-  if action == 'cpp':
-    schema_path = argv[2]
+    for variant in sum.types:
+      if variant.shared_type:
+        pass
+      else:
+        super_name = '%s_t' % sum_name
+        all_fields = variant.fields + sum.attributes
+        tag = '%s_e::%s' % (sum_name, variant.name)
+        class_name = '%s__%s' % (sum_name, variant.name)
+        self._EmitPrettyPrintMethods(class_name, all_fields, variant)
 
-    # NOTE: This import can't be at the top level osh/asdl_gen.py depends on
-    # this gen_cpp.py module.  We should move all the main() functions out of
-    # asdl/ and into command line tools.
+    # Emit dispatch WITHOUT using 'virtual'
+    for abbrev in 'PrettyTree', '_AbbreviatedTree', 'AbbreviatedTree':
+      self.Emit('')
+      self.Emit('hnode_t* %s_t::%s() {' % (sum_name, abbrev))
+      self.Emit('  switch (this->tag_()) {', depth)
 
-    from core.meta import Id
-    app_types = {'id': asdl.UserType(Id)}
-    with open(schema_path) as input_f:
-      module, type_lookup = front_end.LoadSchema(input_f, app_types)
+      for variant in sum.types:
+        if variant.shared_type:
+          subtype_name = variant.shared_type
+        else:
+          subtype_name = '%s__%s' % (sum_name, variant.name)
 
-    # TODO: gen_cpp.py should be a library and the application should add Id?
-    # Or we should enable ASDL metaprogramming, and let Id be a metaprogrammed
-    # simple sum type.
+        self.Emit('  case %s_e::%s: {' % (sum_name, variant.name), depth)
+        self.Emit('    %s* obj = static_cast<%s*>(this);' %
+                  (subtype_name, subtype_name), depth)
+        self.Emit('    return obj->%s();' % abbrev, depth)
+        self.Emit('  }', depth)
 
-    f = sys.stdout
+      self.Emit('  default:', depth)
+      self.Emit('    assert(0);', depth)
 
-    # How do mutation of strings, arrays, etc.  work?  Are they like C++
-    # containers, or their own?  I think they mirror the oil language
-    # semantics.
-    # Every node should have a mirror.  MutableObj.  MutableRef (pointer).
-    # MutableArithVar -- has std::string.  The mirrors are heap allocated.
-    # All the mutable ones should support Dump()/Encode()?
-    # You can just write more at the end... don't need to disturb existing
-    # nodes?  Rewrite pointers.
+      self.Emit('  }')
+      self.Emit('}')
 
-    alignment = 4
-    #enc = encode.Params(alignment)
-    enc = None
-    d = {'pointer_type': enc.pointer_type}
-
-    f.write("""\
-#include <cstdint>
-
-class Obj {
- public:
-  // Decode a 3 byte integer from little endian
-  inline int Int(int n) const;
-
-  inline const Obj& Ref(const %(pointer_type)s* base, int n) const;
-
-  inline const Obj* Optional(const %(pointer_type)s* base, int n) const;
-
-  // NUL-terminated
-  inline const char* Str(const %(pointer_type)s* base, int n) const;
-
- protected:
-  uint8_t bytes_[1];  // first is ID; rest are a payload
-};
-
-""" % d)
-
-    # Id should be treated as an enum.
-    c = ChainOfVisitors(
-        ForwardDeclareVisitor(f),
-        ClassDefVisitor(f, enc, type_lookup, enum_types=['Id']))
-    c.VisitModule(module)
-
-    f.write("""\
-inline int Obj::Int(int n) const {
-  return bytes_[n] + (bytes_[n+1] << 8) + (bytes_[n+2] << 16);
-}
-
-inline const Obj& Obj::Ref(const %(pointer_type)s* base, int n) const {
-  int offset = Int(n);
-  return reinterpret_cast<const Obj&>(base[offset]);
-}
-
-inline const Obj* Obj::Optional(const %(pointer_type)s* base, int n) const {
-  int offset = Int(n);
-  if (offset) {
-    return reinterpret_cast<const Obj*>(base + offset);
-  } else {
-    return nullptr;
-  }
-}
-
-inline const char* Obj::Str(const %(pointer_type)s* base, int n) const {
-  int offset = Int(n);
-  return reinterpret_cast<const char*>(base + offset);
-}
-""" % d)
-  # uint32_t* and char*/Obj* aren't related, so we need to use
-  # reinterpret_cast<>.
-  # http://stackoverflow.com/questions/10151834/why-cant-i-static-cast-between-char-and-unsigned-char
-
-  else:
-    raise RuntimeError('Invalid action %r' % action)
-
-
-if __name__ == '__main__':
-  try:
-    main(sys.argv)
-  except RuntimeError as e:
-    print('FATAL: %s' % e, file=sys.stderr)
-    sys.exit(1)
+  def VisitProduct(self, product, name, depth):
+    #self._GenClass(product, product.attributes, name, None, depth)
+    all_fields = product.fields + product.attributes
+    self._EmitPrettyPrintMethods(name, all_fields, product)

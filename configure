@@ -5,18 +5,22 @@
 #
 # The only library Oil needs is readline.
 #
-# External utilities used: expr, cc
+# External utilities used: cc
 #
 # TODO: Should be able to run this from another directory.
 #
 # Other settings: LTO, PGO?  Consider moving prefix, LTO, PGO to build and
 # install steps.
 
-TMP=${TMP:-/tmp}  # Assume that any system has $TMP set or /tmp exists
+TMP=${TMPDIR:-/tmp}  # Assume that any system has $TMPDIR set or /tmp exists
 readonly TMP  # POSIX sh supports 'readonly'
 
 log() {
   echo "$0: $@" 1>&2
+}
+
+info() {
+  echo "$0 INFO: $@" 1>&2
 }
 
 die() {
@@ -25,25 +29,38 @@ die() {
 }
 
 show_help() {
-  cat <<EOF
-Usage: ./configure [OPTION]
+  cat <<'EOF'
+Usage: ./configure [OPTION...]
 
 Detects system settings before a build of Oil.
 
-  --prefix            Prefix for the bin/ directory [/usr/local]
-  --with-readline     Fail unless readline is available.
-  --without-readline  Don't compile with readline, even if it's available.
-		      The shell won't have any interactive features.
-  --readline          An alternative readline installation to link against
+Installation directories:
+  --prefix=PREFIX               Prefix for the bin/ directory [/usr/local]
+  --datarootdir=DATAROOTDIR     Prefix for data files, including man page [PREFIX/share]
+
+Optional features:
+  --with-readline               Fail unless readline is available.
+  --without-readline            Don't compile with readline, even if it's available.
+                                The shell won't have any interactive features.
+  --readline=DIR                An alternative readline installation to link against
 EOF
 }
 
-# Default installation is /usr/local/bin/oil, but this can be changed with
-# --prefix.  We roughly follow GNU:
+# This script roughly follows the GNU Standards
+# https://www.gnu.org/prep/standards/html_node/Configuration.html
 # https://www.gnu.org/prep/standards/html_node/Directory-Variables.html
+#
+# Default installation is /usr/local/bin/oil, but this can be changed with
+# --prefix.
+#
+# While this script only uses a handful of the standard directory variables
+# listed on the above documents, it accepts most of them in the --arg=value
+# form as noops. This helps automated build-systems passing preconfigured
+# sets of arguments to configure oil.
 FLAG_prefix='/usr/local'
+FLAG_datarootdir=''  # default initialized after processing flags
 FLAG_with_readline=''  # Fail if it's not available.
-FLAG_without_readline=''  # Don't even check if it's available>
+FLAG_without_readline=''  # Don't even check if it's available
 FLAG_readline=''
 
 while true; do
@@ -66,7 +83,7 @@ while true; do
       ;;
 
     --readline=*)
-      FLAG_readline=$(expr "$1" : '--readline=\(.*\)')
+      FLAG_readline="${1#*=}"
       ;;
     --readline)
       if test $# -eq 1; then
@@ -79,7 +96,7 @@ while true; do
     # TODO: Maybe prefix only needs to be part of the install step?  I'm not
     # sure if we need it for building anything.
     --prefix=*)
-      FLAG_prefix=$(expr "$1" : '--prefix=\(.*\)')
+      FLAG_prefix="${1#*=}"
       ;;
     --prefix)
       if test $# -eq 1; then
@@ -88,12 +105,53 @@ while true; do
       shift
       FLAG_prefix=$1
       ;;
+
+    # Following autoconf's spelling of --mandir
+    --datarootdir=*)
+      FLAG_datarootdir="${1#*=}"
+      ;;
+    --datarootdir)
+      if test $# -eq 1; then
+        die "--datarootdir requires an argument"
+      fi
+      shift
+      FLAG_datarootdir=$1
+      ;;
+
+    --with-*|--enable-*)
+      info "Argument '$1' not used by this configure script"
+      ;;
+
+    --build=*|--host=*)
+      info "Argument '$1' not used by this configure script"
+      ;;
+
+    --exec-prefix=*|--bindir=*|--sbindir=*|--libexecdir=*|--sysconfdir=*)
+      info "Argument '$1' not used by this configure script"
+      ;;
+    --sharedstatedir=*|--localstatedir=*|--runstatedir=*)
+      info "Argument '$1' not used by this configure script"
+      ;;
+    --libdir=*|--includedir=*|--oldincludedir=*)
+      info "Argument '$1' not used by this configure script"
+      ;;
+    --datadir=*|--infodir=*|--localedir=*|--mandir=*|--docdir=*)
+      info "Argument '$1' not used by this configure script"
+      ;;
+    --htmldir=*|--dvidir=*|--pdfdir=*|--psdir=*)
+      info "Argument '$1' not used by this configure script"
+      ;;
+
     *)
       die "Invalid argument '$1'"
       ;;
   esac
   shift
 done
+
+# If not set, fallback to --prefix
+FLAG_datarootdir=${FLAG_datarootdir:-$FLAG_prefix/share}
+
 
 # No output file, no logging, no stderr.
 # TODO: Maybe send stdout/stderr to config.log?
@@ -172,6 +230,7 @@ detect_and_echo_vars() {
     detect_readline
   fi
   echo "PREFIX=$FLAG_prefix"
+  echo "DATAROOTDIR=$FLAG_datarootdir"
 }
 
 # c.m4 AC_LANG_INT_SAVE

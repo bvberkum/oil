@@ -259,9 +259,6 @@
 /* Define to 1 if you have the `ftello' function. */
 #define HAVE_FTELLO 1
 
-/* Define to 1 if you have the `ftime' function. */
-#define HAVE_FTIME 1
-
 /* Define to 1 if you have the `ftruncate' function. */
 #define HAVE_FTRUNCATE 1
 
@@ -270,10 +267,6 @@
 
 /* Define to 1 if you have the `gamma' function. */
 /* #undef HAVE_GAMMA */
-
-/* Define if we can use gcc inline assembler to get and set x87 control word
-   */
-#define HAVE_GCC_ASM_FOR_X87 1
 
 /* Define if you have the getaddrinfo function. */
 #define HAVE_GETADDRINFO 1

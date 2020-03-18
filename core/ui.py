@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Copyright 2016 Andy Chu. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -10,278 +9,78 @@ ui.py - User interface constructs.
 """
 from __future__ import print_function
 
-import posix
-import pwd
 import re
 import sys
 
-from asdl import const
+from _devbuild.gen.id_kind_asdl import Id, Id_t, Id_str
+from _devbuild.gen.syntax_asdl import (
+    Token, command_t, command,
+    source_e, source__Stdin, source__MainFile, source__SourcedFile,
+    source__EvalArg, source__Alias, source__LValue,
+)
+from _devbuild.gen.runtime_asdl import value_str, value_e, value_t, value__Str
+from asdl import runtime
 from asdl import format as fmt
 from asdl import shvisitor
-from core import dev
-from core.meta import runtime_asdl, syntax_asdl, Id
-from frontend import match
-from osh import ast_lib
+from osh import word_
+from mycpp import mylib
+from mycpp.mylib import tagswitch, NewStr
 
-import libc  # gethostname()
-
-value_e = runtime_asdl.value_e
-command = syntax_asdl.command
-word = syntax_asdl.word
-word_part = syntax_asdl.word_part
-
-
-def Clear():
-  sys.stdout.write('\033[2J')  # clear screen
-  sys.stdout.write('\033[2;0H')  # Move to 2,0  (below status bar)
-  sys.stdout.flush()
+from typing import List, cast, Any, TYPE_CHECKING
+if TYPE_CHECKING:
+  from core.alloc import Arena
+  from core.error import _ErrorWithLocation
+  from mycpp.mylib import Writer
+  #from frontend.args import UsageError
 
 
-class StatusLine(object):
-  """For optionally displaying the progress of slow completions."""
+def ValType(val):
+  # type: (value_t) -> str
+  """For displaying type errors in the UI."""
 
-  def __init__(self, row_num=3, width=80):
-    # NOTE: '%-80s' % msg doesn't do this, because it doesn't pad at the end
-    self.width = width
-    self.row_num = row_num
-
-  def _FormatMessage(self, msg):
-    max_width = self.width - 4  # two spaces on each side
-    # Truncate if necessary.  TODO: could display truncation char?
-    msg = msg[:max_width]
-
-    num_end_spaces = max_width - len(msg) + 2  # at least 2 spaces at the end
-
-    to_print = '  %s%s' % (msg, ' ' * num_end_spaces)
-    return to_print
-
-  def Write(self, msg, *args):
-    if args:
-      msg = msg % args
-
-    sys.stdout.write('\033[s')  # save
-    # TODO: When there is more than one option for completion, we scroll past
-    # this.
-    # TODO: Should status line be BELOW, and disappear after readline?
-    # Or really it should be at the right margin?  At hit Ctrl-C to cancel?
-
-    sys.stdout.write('\033[%d;0H' % self.row_num)  # Move the cursor
-
-    sys.stdout.write('\033[7m')  # reverse video
-
-    # Make sure you draw the same number of spaces
-    # TODO: detect terminal width
-
-    sys.stdout.write(self._FormatMessage(msg))
-
-    sys.stdout.write('\033[0m')  # remove attributes
-
-    sys.stdout.write('\033[u')  # restore
-    sys.stdout.flush()
+  # Displays 'value.MaybeStrArray' for now, maybe change it.
+  return NewStr(value_str(val.tag_()))
 
 
-class TestStatusLine(object):
-  def __init__(self):
-    pass
+def PrettyId(id_):
+  # type: (Id_t) -> str
+  """For displaying type errors in the UI."""
 
-  def Write(self, msg, *args):
-    """NOTE: We could use logging?"""
-    if args:
-      msg = msg % args
-    print('\t' + msg)
+  # Displays 'Id.BoolUnary_v' for now
+  return NewStr(Id_str(id_))
 
 
-#
-# Prompt handling
-#
+def PrettyToken(tok, arena):
+  # type: (Token, Arena) -> str
+  """Returns a readable token value for the user.  For syntax errors."""
+  if tok.id == Id.Eof_Real:
+    return 'EOF'
 
-# Global instance set by main().  TODO: Use dependency injection.
-PROMPT = None
-
-# NOTE: word_compile._ONE_CHAR has some of the same stuff.
-_ONE_CHAR = {
-  'a' : '\a',
-  'e' : '\x1b',
-  'r': '\r',
-  'n': '\n',
-  '\\' : '\\',
-}
+  span = arena.GetLineSpan(tok.span_id)
+  line = arena.GetLine(span.line_id)
+  val = line[span.col: span.col + span.length]
+  # TODO: Print length 0 as 'EOF'?
+  return repr(val)
 
 
-def _GetUserName(uid):
-  try:
-    e = pwd.getpwuid(uid)
-  except KeyError:
-    return "<ERROR: Couldn't determine user name for uid %d>" % uid
-  else:
-    return e.pw_name
+def PrettyDir(dir_name, UP_home_dir):
+  # type: (str, value_t) -> str
+  """Maybe replace the home dir with ~.
 
-
-class _PromptCache(object):
-  """Cache some values we don't expect to change for the life of a process."""
-
-  def __init__(self):
-    self.cache = {}
-
-  def Get(self, name):
-    if name in self.cache:
-      return self.cache[name]
-
-    if name == 'euid':  # for \$ and \u
-      value = posix.geteuid()
-    elif name == 'hostname':  # for \h and \H
-      value = libc.gethostname()
-    elif name == 'user':  # for \u
-      value = _GetUserName(self.Get('euid'))  # recursive call for caching
-    else:
-      raise AssertionError(name)
-
-    self.cache[name] = value
-    return value
-
-
-class Prompt(object):
-  """Evaluate the prompt mini-language.
-
-  bash has a very silly algorithm:
-  1. replace backslash codes, except any $ in those values get quoted into \$.
-  2. Parse the word as if it's in a double quoted context, and then evaluate
-  the word.
-
-  Haven't done this from POSIX: POSIX:
-  http://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html
-
-  The shell shall replace each instance of the character '!' in PS1 with the
-  history file number of the next command to be typed. Escaping the '!' with
-  another '!' (that is, "!!" ) shall place the literal character '!' in the
-  prompt.
+  Used by the 'dirs' builtin and the prompt evaluator.
   """
-  def __init__(self, lang, arena, parse_ctx, ex, mem):
-    assert lang in ('osh', 'oil'), lang
-    self.lang = lang
-    self.arena = arena
-    self.parse_ctx = parse_ctx
-    self.ex = ex
-    self.mem = mem
+  if UP_home_dir and UP_home_dir.tag_() == value_e.Str:
+    home_dir = cast(value__Str, UP_home_dir).s
+    if dir_name == home_dir or dir_name.startswith(home_dir + '/'):
+      return '~' + dir_name[len(home_dir):]
 
-    # The default prompt is osh$ or oil$ for now.  bash --noprofile --norc ->
-    # 'bash-4.3$ '
-    self.default_prompt = lang + '$ '
-    self.cache = _PromptCache()  # Cache to save syscalls / libc calls.
-
-    # These caches should reduce memory pressure a bit.  We don't want to
-    # reparse the prompt twice every time you hit enter.
-    self.tokens_cache = {}  # string -> list of tokens
-    self.parse_cache = {}  # string -> CompoundWord.
-
-  def _ReplaceBackslashCodes(self, tokens):
-    ret = []
-    non_printing = 0
-    for id_, value in tokens:
-      # BadBacklash means they should have escaped with \\, but we can't
-      # make this an error.
-      if id_ in (Id.PS_Literals, Id.PS_BadBackslash):
-        ret.append(value)
-
-      elif id_ == Id.PS_Octal3:
-        i = int(value[1:], 8)
-        ret.append(chr(i % 256))
-
-      elif id_ == Id.PS_LBrace:
-        non_printing += 1
-
-      elif id_ == Id.PS_RBrace:
-        non_printing -= 1
-
-      elif id_ == Id.PS_Subst:  # \u \h \w etc.
-        char = value[1:]
-        if char == '$':  # So the user can tell if they're root or not.
-          r = '#' if self.cache.Get('euid') == 0 else '$'
-
-        elif char == 'u':
-          r = self.cache.Get('user')
-
-        elif char == 'h':
-          r = self.cache.Get('hostname')
-
-        elif char == 'w':
-          # TODO: This should shorten to ~foo when applicable.
-          val = self.mem.GetVar('PWD')
-          if val.tag == value_e.Str:
-            r = val.s
-          else:
-            r = '<Error: PWD is not a string>'
-
-        elif char in _ONE_CHAR:
-          r = _ONE_CHAR[char]
-
-        else:
-          raise NotImplementedError(char)
-
-        # See comment above on bash hack for $.
-        ret.append(r.replace('$', '\\$'))
-
-      else:
-        raise AssertionError('Invalid token %r' % id_)
-
-    return ''.join(ret)
-
-  def EvalPrompt(self, val):
-    """Perform the two evaluations that bash does.  Used by $PS1 and ${x@P}."""
-    if val.tag != value_e.Str:
-      return self.default_prompt  # no evaluation necessary
-
-    # Parse backslash escapes (cached)
-    try:
-      tokens = self.tokens_cache[val.s]
-    except KeyError:
-      tokens = list(match.PS1_LEXER.Tokens(val.s))
-      self.tokens_cache[val.s] = tokens
-
-    # Replace values.
-    ps1_str = self._ReplaceBackslashCodes(tokens)
-
-    # Parse it like a double-quoted word (cached).
-    # NOTE: This is copied from the PS4 logic in Tracer.
-    try:
-      ps1_word = self.parse_cache[ps1_str]
-    except KeyError:
-      w_parser = self.parse_ctx.MakeWordParserForPlugin(ps1_str, self.arena)
-      try:
-        ps1_word = w_parser.ReadPS()
-      except Exception as e:
-        error_str = '<ERROR: cannot parse PS1>'
-        t = syntax_asdl.token(Id.Lit_Chars, error_str, const.NO_INTEGER)
-        ps1_word = word.CompoundWord([word_part.LiteralPart(t)])
-      self.parse_cache[ps1_str] = ps1_word
-
-    # Evaluate, e.g. "${debian_chroot}\u" -> '\u'
-    val2 = self.ex.word_ev.EvalWordToString(ps1_word)
-    return val2.s
-
-  def FirstPrompt(self):
-    if self.lang == 'osh':
-      val = self.mem.GetVar('PS1')
-      return self.EvalPrompt(val)
-    else:
-      # TODO: If the lang is Oil, we should use a better prompt language than
-      # $PS1!!!
-      return self.default_prompt
+  return dir_name
 
 
-def PrintFilenameAndLine(span_id, arena, f=sys.stderr):
-  line_span = arena.GetLineSpan(span_id)
-  line_id = line_span.line_id
-  line = arena.GetLine(line_id)
-  path, line_num = arena.GetDebugInfo(line_id)
-  col = line_span.col
-  length = line_span.length
-
-  # TODO: If the line is blank, it would be nice to print the last non-blank
-  # line too?
-  print('Line %d of %r' % (line_num, path), file=f)
-  print('  ' + line.rstrip(), file=f)
-  f.write('  ')
+def _PrintCodeExcerpt(line, col, length, f):
+  # type: (str, int, int, Writer) -> None
+  f.write('  '); f.write(line.rstrip())
+  f.write('\n  ')
   # preserve tabs
   for c in line[:col]:
     f.write('\t' if c == '\t' else ' ')
@@ -290,77 +89,245 @@ def PrintFilenameAndLine(span_id, arena, f=sys.stderr):
   f.write('\n')
 
 
-def PrettyPrintError(parse_error, arena, f=sys.stderr):
-  span_id = dev.SpanIdFromError(parse_error)
+def _PrintWithSpanId(prefix, msg, span_id, arena, f):
+  # type: (str, str, int, Arena, Writer) -> None
+  line_span = arena.GetLineSpan(span_id)
+  orig_col = line_span.col
+  line_id = line_span.line_id
 
-  # TODO: Should there be a special span_id of 0 for EOF?  const.NO_INTEGER
+  src = arena.GetLineSource(line_id)
+  line = arena.GetLine(line_id)
+  line_num = arena.GetLineNumber(line_id)  # overwritten by source__LValue case
+
+  # LValue is the only case where we don't print this
+  if src.tag_() != source_e.LValue:
+    _PrintCodeExcerpt(line, line_span.col, line_span.length, f)
+
+  UP_src = src
+  with tagswitch(src) as case:
+    # TODO: Use color instead of [ ]
+    if case(source_e.Interactive):
+      source_str = '[ interactive ]'  # This might need some changes
+    elif case(source_e.CFlag):
+      source_str = '[ -c flag ]'
+
+    elif case(source_e.Stdin):
+      src = cast(source__Stdin, UP_src)
+      source_str = '[ stdin%s ]' % src.comment
+    elif case(source_e.MainFile):
+      src = cast(source__MainFile, UP_src)
+      source_str = src.path
+
+    elif case(source_e.SourcedFile):
+      src = cast(source__SourcedFile, UP_src)
+      # TODO: could chain of 'source' with the spid
+      source_str = src.path
+
+    elif case(source_e.Alias):
+      src = cast(source__Alias, UP_src)
+      source_str = '[ expansion of alias %r ]' % src.argv0
+    elif case(source_e.Backticks):
+      #src = cast(source__Backticks, UP_src)
+      source_str = '[ backticks at ... ]'
+    elif case(source_e.LValue):
+      src = cast(source__LValue, UP_src)
+      span2 = arena.GetLineSpan(src.left_spid)
+      line2 = arena.GetLine(span2.line_id)
+      outer_source = arena.GetLineSourceString(span2.line_id)
+      source_str = '[ array LValue in %s ]' % outer_source
+      # NOTE: The inner line number is always 1 because of reparsing.  We
+      # overwrite it with the original span.
+      line_num = arena.GetLineNumber(span2.line_id)
+
+      # We want the excerpt to look like this:
+      #   a[x+]=1
+      #       ^
+      # Rather than quoting the internal buffer:
+      #   x+
+      #     ^
+      lbracket_col = span2.col + span2.length
+      _PrintCodeExcerpt(line2, orig_col + lbracket_col, 1, f)
+
+    elif case(source_e.EvalArg):
+      src = cast(source__EvalArg, UP_src)
+      span = arena.GetLineSpan(src.eval_spid)
+      line_num = arena.GetLineNumber(span.line_id)
+      outer_source = arena.GetLineSourceString(span.line_id)
+      source_str = '[ eval at line %d of %s ]' % (line_num, outer_source)
+
+    elif case(source_e.Trap):
+      # TODO: Look at word_spid
+      source_str = '[ trap ]'
+
+    else:
+      # TODO: shouldn't really get here
+      source_str = repr(src)
+
+  # TODO: If the line is blank, it would be nice to print the last non-blank
+  # line too?
+  f.write('%s:%d: %s%s\n' % (source_str, line_num, prefix, msg))
+
+
+def _PrintWithOptionalSpanId(prefix, msg, span_id, arena):
+  # type: (str, str, int, Arena) -> None
+  f = mylib.Stderr()
+  if span_id == runtime.NO_SPID:  # When does this happen?
+    f.write('[??? no location ???] %s%s\n' % (prefix, msg))
+  else:
+    _PrintWithSpanId(prefix, msg, span_id, arena, f)
+
+
+def _pp(err, arena, prefix):
+  # type: (_ErrorWithLocation, Arena, str) -> None
+  """
+  Called by free function PrettyPrintError and method PrettyPrintError.  This
+  is a HACK for mycpp translation.  C++ can't find a free function
+  PrettyPrintError() when called within a METHOD of the same name.
+  """
+  msg = err.UserErrorString()
+  span_id = word_.SpanIdFromError(err)
+
+  # TODO: Should there be a special span_id of 0 for EOF?  runtime.NO_SPID
   # means there is no location info, but 0 could mean that the location is EOF.
   # So then you query the arena for the last line in that case?
   # Eof_Real is the ONLY token with 0 span, because it's invisible!
-  # Well Eol_Tok is a sentinel with a span_id of const.NO_INTEGER.  I think
+  # Well Eol_Tok is a sentinel with a span_id of runtime.NO_SPID.  I think
   # that is OK.
   # Problem: the column for Eof could be useful.
 
-  if span_id == const.NO_INTEGER:  # Any clause above might return this.
-    # This is usually a bug.
-    print('*** Error has no source location info ***', file=f)
-  else:
-    PrintFilenameAndLine(span_id, arena, f=f)
-
-  print(parse_error.UserErrorString(), file=f)
+  _PrintWithOptionalSpanId(prefix, msg, span_id, arena)
 
 
-def PrintAst(nodes, opts):
-  if len(nodes) == 1:
-    node = nodes[0]
-  else:
-    node = command.CommandList(nodes)
+def PrettyPrintError(err, arena, prefix=''):
+  # type: (_ErrorWithLocation, Arena, str) -> None
+  """
+  Args:
+    prefix: in osh/cmd_exec.py we want to print 'fatal'
+  """
+  _pp(err, arena, prefix)
 
-  if opts.ast_format == 'none':
-    print('AST not printed.', file=sys.stderr)
 
-  elif opts.ast_format == 'command-names':
+# TODO:
+# - ColorErrorFormatter
+# - BareErrorFormatter?  Could just display the foo.sh:37:8: and not quotation.
+#
+# Are these controlled by a flag?  It's sort of like --comp-ui.  Maybe
+# --error-ui.
 
-    ignores, prefixes, vars = [], [], []
-    re_sids = re.compile('[, ]')
+class ErrorFormatter(object):
 
-    if opts.exec_builtins:
-        shvisitor.CmdNameVisitor.builtins = re_sids.split(opts.exec_builtins)
-    if opts.exec_ignores:
-        ignores = re_sids.split(opts.exec_ignores)
-    if opts.exec_prefixes:
-        prefixes = re_sids.split(opts.exec_prefixes)
-    if opts.exec_vars:
-        vars = re_sids.split(opts.exec_vars)
+  def __init__(self, arena):
+    # type: (Arena) -> None
+    self.arena = arena
+    self.last_spid = runtime.NO_SPID  # last resort for location info
+    self.spid_stack = []  # type: List[int]
 
-    v = shvisitor.CmdNameVisitor(ignores, prefixes, vars)
-    v.visit(node)
+  # A stack used for the current builtin.  A fallback for UsageError.
+  # TODO: Should we have PushBuiltinName?  Then we can have a consistent style
+  # like foo.sh:1: (compopt) Not currently executing.
 
-  elif opts.ast_format == 'var-names':
+  def PushLocation(self, spid):
+    # type: (int) -> None
+    #log('%sPushLocation(%d)', '  ' * len(self.spid_stack), spid)
+    self.spid_stack.append(spid)
 
-    v = shvisitor.VarNameVisitor()
-    v.visit(node)
+  def PopLocation(self):
+    # type: () -> None
+    self.spid_stack.pop()
+    #log('%sPopLocation -> %d', '  ' * len(self.spid_stack), self.last_spid)
 
-  else:  # text output
-    f = sys.stdout
-
-    if opts.ast_format in ('text', 'abbrev-text'):
-      ast_f = fmt.DetectConsoleOutput(f)
-    elif opts.ast_format in ('html', 'abbrev-html'):
-      ast_f = fmt.HtmlOutput(f)
+  def CurrentLocation(self):
+    # type: () -> int
+    if len(self.spid_stack):
+      return self.spid_stack[-1]
     else:
-      raise AssertionError, opts.ast_format
-    abbrev_hook = (
-        ast_lib.AbbreviateNodes if 'abbrev-' in opts.ast_format else None)
-    tree = fmt.MakeTree(node, abbrev_hook=abbrev_hook)
-    ast_f.FileHeader()
-    fmt.PrintTree(tree, ast_f)
-    ast_f.FileFooter()
-    ast_f.write('\n')
+      return runtime.NO_SPID
+
+  if mylib.PYTHON:
+    def Print(self, msg, *args, **kwargs):
+      # type: (str, *Any, **Any) -> None
+      """Print a message with a code quotation based on the given span_id."""
+      span_id = kwargs.pop('span_id', self.CurrentLocation())
+      prefix = kwargs.pop('prefix', '')
+      if args:
+        msg = msg % args
+      _PrintWithOptionalSpanId(prefix, msg, span_id, self.arena)
+
+  def PrettyPrintError(self, err, prefix=''):
+    # type: (_ErrorWithLocation, str) -> None
+    """Print an exception that was caught."""
+    _pp(err, self.arena, prefix)
 
 
-def usage(msg, *args):
-  """For user-facing usage errors."""
-  if args:
-    msg = msg % args
-  print(msg, file=sys.stderr)
+if mylib.PYTHON:
+  def Stderr(msg, *args):
+    # type: (str, *Any) -> None
+    """Print a message to stderr for the user.
+
+    This should be used sparingly, since it doesn't have any location info.
+    Right now we use it to print fatal I/O errors that were only caught at the
+    top level.
+    """
+    if args:
+      msg = msg % args
+    print(msg, file=sys.stderr)
+
+  # Doesn't translate because of Any type
+  # Options may need metaprogramming!
+  def PrintAst(nodes, opts):
+    # type: (List[command_t], Any) -> None
+    if len(nodes) == 1:
+      node = nodes[0]
+    else:
+      node = command.CommandList(nodes)
+
+    if opts.ast_format == 'none':
+      print('AST not printed.', file=sys.stderr)
+      if 0:
+        from _devbuild.gen.id_kind_asdl import Id_str
+        from frontend.lexer import ID_HIST
+        for id_, count in ID_HIST.most_common(10):
+          print('%8d %s' % (count, Id_str(id_)))
+        print()
+        total = sum(ID_HIST.values())
+        print('%8d total tokens returned' % total)
+
+    elif opts.ast_format == 'command-names':
+      ignores, prefixes, vars = [], [], []
+      re_sids = re.compile('[, ]')
+
+      if opts.exec_builtins:
+          shvisitor.CmdNameVisitor.builtins = re_sids.split(opts.exec_builtins)
+      if opts.exec_ignores:
+          ignores = re_sids.split(opts.exec_ignores)
+      if opts.exec_prefixes:
+          prefixes = re_sids.split(opts.exec_prefixes)
+      if opts.exec_vars:
+          vars = re_sids.split(opts.exec_vars)
+
+      v = shvisitor.CmdNameVisitor(ignores, prefixes, vars)
+      v.visit(node)
+
+    elif opts.ast_format == 'var-names':
+      v = shvisitor.VarNameVisitor()
+      v.visit(node)
+
+    else:  # text output
+      f = mylib.Stdout()
+
+      if opts.ast_format in ('text', 'abbrev-text'):
+        ast_f = fmt.DetectConsoleOutput(f)
+      elif opts.ast_format in ('html', 'abbrev-html'):
+        ast_f = fmt.HtmlOutput(f)
+      else:
+        raise AssertionError()
+
+      if 'abbrev-' in opts.ast_format:
+        tree = node.AbbreviatedTree()
+      else:
+        tree = node.PrettyTree()
+
+      ast_f.FileHeader()
+      fmt.PrintTree(tree, ast_f)
+      ast_f.FileFooter()
+      ast_f.write('\n')

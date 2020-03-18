@@ -1,0 +1,16 @@
+module expr {
+
+tok = 
+    Const
+  | Var
+  | Op1
+  | Op2
+  | Paren
+  | Eof
+  | Invalid
+
+expr = 
+    Const(int i)
+  | Var(string name) 
+  | Binary(string op, expr left, expr right)
+}

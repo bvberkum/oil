@@ -1,4 +1,4 @@
-#!/usr/bin/python -S
+#!/usr/bin/env python2
 """
 reader_test.py: Tests for reader.py
 """
@@ -6,16 +6,13 @@ reader_test.py: Tests for reader.py
 import cStringIO
 import unittest
 
+from _devbuild.gen.syntax_asdl import source
 from core import alloc
 from core import test_lib
 from frontend import reader  # module under test
 
 
 class ReaderTest(unittest.TestCase):
-
-  def setUp(self):
-    self.pool = alloc.Pool()
-    #self.arena = pool.NewArena()
 
   def testStringLineReader(self):
     arena = test_lib.MakeArena('<reader_test.py>')
@@ -26,19 +23,19 @@ class ReaderTest(unittest.TestCase):
     self.assertEqual((-1, None, 0), r.GetLine())
 
   def testLineReadersAreEquivalent(self):
-    a1 = self.pool.NewArena()
+    a1 = alloc.Arena()
     r1 = reader.StringLineReader('one\ntwo', a1)
 
-    a2 = self.pool.NewArena()
+    a2 = alloc.Arena()
     f = cStringIO.StringIO('one\ntwo')
     r2 = reader.FileLineReader(f, a2)
 
-    a3 = self.pool.NewArena()
+    a3 = alloc.Arena()
     lines = [(0, 'one\n', 0), (1, 'two', 0)]
     r3 = reader.VirtualLineReader(lines, a3)
 
     for a in [a1, a2, a3]:
-      a.PushSource('reader_test.py')
+      a.PushSource(source.MainFile('reader_test.py'))
 
     for r in [r1, r2, r3]:
       print(r)

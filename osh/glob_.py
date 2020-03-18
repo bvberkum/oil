@@ -1,41 +1,39 @@
-#!/usr/bin/env python
 """
 glob_.py
 """
 
-try:
-  import libc
-except ImportError:
-  from benchmarks import fake_libc as libc
+import libc
 
-from core.meta import syntax_asdl, Id
+from _devbuild.gen.id_kind_asdl import Id, Id_t
+from _devbuild.gen.syntax_asdl import (
+    compound_word, Token, word_part_e,
+    glob_part_e, glob_part, glob_part_t,
+    glob_part__Literal, glob_part__Operator, glob_part__CharClass,
+)
 from core import util
+from core.pyutil import stderr_line
+#from core.util import log
 from frontend import match
 
-log = util.log
-glob_part_e = syntax_asdl.glob_part_e
-glob_part = syntax_asdl.glob_part
+from typing import List, Tuple, cast, TYPE_CHECKING
+if TYPE_CHECKING:
+  from core import optview
+  from frontend.match import SimpleLexer
 
-# TODO: Need LooksLikeExtGlob?
-#
-# pat='@(foo|bar)'
-# [[ foo == $pat ]] -- this works.
-#
-# Problem with extended glob -> ERE
-# x!(foo|bar)y
 
 def LooksLikeGlob(s):
-  """
+  # type: (str) -> bool
+  """Does this string look like a glob pattern?
+
+  Like other shells, OSH avoids calls to glob() unless there are glob
+  metacharacters.
+
   TODO: Reference lib/glob /   glob_pattern functions in bash
-  grep glob_pattern lib/glob/*
+  $ grep glob_pattern lib/glob/*
 
-  NOTE: Dash has CTLESC = -127.
-  Does that mean a string is an array of ints or shorts?  Not bytes?
-  How does it handle unicode/utf-8 then?
-  Nope it's using it with char* p.
-  So it dash only ASCII or what?  TODO: test it
-
-  Still need this for slow path / fast path of prefix/suffix/patsub ops.
+  Used:
+  1. in Globber below
+  2. for the slow path / fast path of prefix/suffix/patsub ops.
   """
   left_bracket = False
   i = 0
@@ -49,18 +47,28 @@ def LooksLikeGlob(s):
     elif c == '[':
       left_bracket = True
     elif c == ']' and left_bracket:
+      # It has at least one pair of balanced [].  Not bothering to check stray
+      # [ or ].
       return True
     i += 1
   return False
 
 
-def _BackslashEscape(s, meta_chars):
-  escaped = []
-  for c in s:
-    if c in meta_chars:
-      escaped.append('\\')
-    escaped.append(c)
-  return ''.join(escaped)
+def LooksLikeStaticGlob(w):
+  # type: (compound_word) -> bool
+  """Like LooksLikeGlob, but for static words."""
+
+  left_bracket = False
+  for part in w.parts:
+    if part.tag_() == word_part_e.Literal:
+      id_ = cast(Token, part).id
+      if id_ in (Id.Lit_Star, Id.Lit_QMark):
+        return True
+      elif id_ == Id.Lit_LBracket:
+        left_bracket = True
+      elif id_ == Id.Lit_RBracket and left_bracket:
+        return True
+  return False
 
 
 # Glob Helpers for WordParts.
@@ -69,28 +77,40 @@ def _BackslashEscape(s, meta_chars):
 GLOB_META_CHARS = r'\*?[]-:!'
 
 def GlobEscape(s):
+  # type: (str) -> str
   """
-  For SingleQuotedPart, DoubleQuotedPart, and EscapedLiteralPart
+  For SingleQuoted, DoubleQuoted, and EscapedLiteral
   """
-  return _BackslashEscape(s, GLOB_META_CHARS)
+  return util.BackslashEscape(s, GLOB_META_CHARS)
 
 
-# Quoted parts need to be regex-escaped, e.g. [[ $a =~ "{" ]].  I don't think
-# libc has a function to do this.  Escape these characters:
-# https://www.gnu.org/software/sed/manual/html_node/ERE-syntax.html Use
+def EreCharClassEscape(s):
+  # type: (str) -> str
 
-# NOTE: Weird bash rule: (|) are literal and don't have to be escaped.
-# The list of chars {}$ is determined by experience.
-ERE_META_CHARS = '{}$'
+  # \ is escaping
+  # ^ would invert it at the front,
+  # - is range
+  #
+  # ] would close it -- but there is a weird posix rule where it has to be put
+  # FIRST.  Like []abc].
+  return util.BackslashEscape(s, r'\^-')
+
+
+ERE_META_CHARS = r'\?*+{}^$.()|'
 
 def ExtendedRegexEscape(s):
+  # type: (str) -> str
   """
-  For [[ foo =~ $\{ ]]
+  Quoted parts need to be regex-escaped when quoted, e.g. [[ $a =~ "{" ]].  I
+  don't think libc has a function to do this.  Escape these characters:
+
+  https://www.gnu.org/software/sed/manual/html_node/ERE-syntax.html
   """
-  return _BackslashEscape(s, ERE_META_CHARS)
+  return util.BackslashEscape(s, ERE_META_CHARS)
 
 
-def _GlobUnescape(s):  # used by cmd_exec
+def GlobUnescape(s):  # used by cmd_exec
+  # type: (str) -> str
   """Remove glob escaping from a string.
 
   Used when there is no glob match.
@@ -100,7 +120,7 @@ def _GlobUnescape(s):  # used by cmd_exec
   word_eval _JoinElideEscape and EvalWordToString you have to build two
   'parallel' strings -- one escaped and one not.
   """
-  unescaped = ''
+  unescaped = []  # type: List[str]
   i = 0
   n = len(s)
   while i < n:
@@ -110,13 +130,13 @@ def _GlobUnescape(s):  # used by cmd_exec
       i += 1
       c2 = s[i]
       if c2 in GLOB_META_CHARS:
-        unescaped += c2
+        unescaped.append(c2)
       else:
         raise AssertionError("Unexpected escaped character %r" % c2)
     else:
-      unescaped += c
+      unescaped.append(c)
     i += 1
-  return unescaped
+  return ''.join(unescaped)
 
 
 # For ${x//foo*/y}, we need to glob patterns, but fnmatch doesn't give you the
@@ -129,27 +149,27 @@ def _GlobUnescape(s):  # used by cmd_exec
 class _GlobParser(object):
 
   def __init__(self, lexer):
+    # type: (SimpleLexer) -> None
     self.lexer = lexer
-    self.token_type = None
+    self.token_type = Id.Undefined_Tok
     self.token_val = ''
-    self.warnings = []
+    self.warnings = []  # type: List[str]
 
   def _Next(self):
+    # type: () -> None
     """Move to the next token."""
-    try:
-      self.token_type, self.token_val = self.lexer.next()
-    except StopIteration:
-      self.token_type = Id.Glob_Eof
-      self.token_val = ''
+    self.token_type, self.token_val = self.lexer.Next()
 
   def _ParseCharClass(self):
+    # type: () -> List[glob_part_t]
     """
     Returns:
-      a CharClass if the parse suceeds, or a GlobLit if fails.  In the latter
+      a CharClass if the parse suceeds, or a Literal if fails.  In the latter
       case, we also append a warning.
     """
+    first_token = glob_part.Literal(self.token_type, self.token_val)
     balance = 1  # We already saw a [
-    tokens = []
+    tokens = []  # type: List[Tuple[Id_t, str]]
 
     # NOTE: There is a special rule where []] and [[] are valid globs.  Also
     # [^[] and sometimes [^]], although that one is ambiguous!
@@ -160,10 +180,13 @@ class _GlobParser(object):
     while True:
       self._Next()
 
-      if self.token_type == Id.Glob_Eof:
+      if self.token_type == Id.Eol_Tok:
         # TODO: location info
         self.warnings.append('Malformed character class; treating as literal')
-        return [glob_part.GlobLit(id_, s) for (id_, s) in tokens]
+        parts = [first_token]  # type: List[glob_part_t]
+        for (id_, s) in tokens:
+          parts.append(glob_part.Literal(id_, s))
+        return parts
 
       if self.token_type == Id.Glob_LBracket:
         balance += 1
@@ -175,7 +198,7 @@ class _GlobParser(object):
       tokens.append((self.token_type, self.token_val))  # Don't append the last ]
 
     negated = False
-    if tokens:
+    if len(tokens):
       id1, _ = tokens[0]
       # NOTE: Both ! and ^ work for negation in globs
       # https://www.gnu.org/software/bash/manual/html_node/Pattern-Matching.html#Pattern-Matching
@@ -183,15 +206,17 @@ class _GlobParser(object):
       if id1 in (Id.Glob_Bang, Id.Glob_Caret):
         negated = True
         tokens = tokens[1:]
-    return [glob_part.CharClass(negated, [s for _, s in tokens])]
+    strs = [s for _, s in tokens]
+    return [glob_part.CharClass(negated, strs)]
 
   def Parse(self):
+    # type: () -> Tuple[List[glob_part_t], List[str]]
     """
     Returns:
       regex string (or None if it's not a glob)
       A list of warnings about the syntax
     """
-    parts = []
+    parts = []  # type: List[glob_part_t]
 
     while True:
       self._Next()
@@ -199,19 +224,19 @@ class _GlobParser(object):
       s = self.token_val
 
       #util.log('%s %r', self.token_type, self.token_val)
-      if id_ == Id.Glob_Eof:
+      if id_ == Id.Eol_Tok:
         break
 
       if id_ in (Id.Glob_Star, Id.Glob_QMark):
-        parts.append(glob_part.GlobOp(id_))
+        parts.append(glob_part.Operator(id_))
 
       elif id_ == Id.Glob_LBracket:
-        # Could return a GlobLit or a CharClass
+        # Could return a Literal or a CharClass
         parts.extend(self._ParseCharClass())
 
       else: # Glob_{Bang,Caret,CleanLiterals,OtherLiteral,RBracket,EscapedChar,
             #       BadBackslash}
-        parts.append(glob_part.GlobLit(id_, s))
+        parts.append(glob_part.Literal(id_, s))
 
       # Also check for warnings.  TODO: location info.
       if id_ == Id.Glob_RBracket:
@@ -225,10 +250,15 @@ class _GlobParser(object):
 _REGEX_CHARS_TO_ESCAPE = '.|^$()+*?[]{}\\'
 
 def _GenerateERE(parts):
-  out = []
+  # type: (List[glob_part_t]) -> str
+  out = []  # type: List[str]
 
   for part in parts:
-    if part.tag == glob_part_e.GlobLit:
+    tag = part.tag_()
+    UP_part = part
+
+    if tag == glob_part_e.Literal:
+      part = cast(glob_part__Literal, UP_part)
       if part.id == Id.Glob_EscapedChar:
         assert len(part.s) == 2, part.s
         # The user could have escaped a char that doesn't need regex escaping,
@@ -248,15 +278,30 @@ def _GenerateERE(parts):
           out.append('\\')
         out.append(c)
 
-    elif part.tag == glob_part_e.GlobOp:
+      # These are UNMATCHED ones not parsed in a glob class
+      elif part.id == Id.Glob_LBracket:
+        out.append('\\[')
+
+      elif part.id == Id.Glob_RBracket:
+        out.append('\\]')
+
+      elif part.id == Id.Glob_BadBackslash:
+        out.append('\\\\')
+
+      else:
+        raise AssertionError(part.id)
+
+    elif tag == glob_part_e.Operator:
+      part = cast(glob_part__Operator, UP_part)
       if part.op_id == Id.Glob_QMark:
         out.append('.')
       elif part.op_id == Id.Glob_Star:
         out.append('.*')
       else:
-        raise AssertionError
+        raise AssertionError()
 
-    elif part.tag == glob_part_e.CharClass:
+    elif tag == glob_part_e.CharClass:
+      part = cast(glob_part__CharClass, UP_part)
       out.append('[')
       if part.negated:
         out.append('^')
@@ -272,20 +317,19 @@ def _GenerateERE(parts):
 
 
 def GlobToERE(pat):
-  lexer = match.GLOB_LEXER.Tokens(pat)
+  # type: (str) -> Tuple[str, List[str]]
+  lexer = match.GlobLexer(pat)
   p = _GlobParser(lexer)
   parts, warnings = p.Parse()
 
-  # If there is nothing like * ? or [abc], then the whole string is a literal,
-  # and we can use a more efficient mechanism.
-  is_glob = False
-  for p in parts:
-    if p.tag in (glob_part_e.GlobOp, glob_part_e.CharClass):
-      is_glob = True
-
-  if not is_glob:
-    return None, warnings
-
+  # Vestigial: if there is nothing like * ? or [abc], then the whole string is
+  # a literal, and we could use a more efficient mechanism.
+  # But we would have to DEQUOTE before doing that.
+  if 0:
+    is_glob = False
+    for p in parts:
+      if p.tag in (glob_part_e.Operator, glob_part_e.CharClass):
+        is_glob = True
   if 0:
     print('---')
     for p in parts:
@@ -297,52 +341,77 @@ def GlobToERE(pat):
 
 class Globber(object):
   def __init__(self, exec_opts):
+    # type: (optview.Exec) -> None
     self.exec_opts = exec_opts
 
+    # Other unimplemented bash options:
+    #
+    # dotglob           dotfiles are matched
+    # globstar          ** for directories
+    # globasciiranges   ascii or unicode char classes (unicode by default)
+    # nocaseglob
+    # extglob          the !() syntax -- only respected for fnmatch(), not glob
+    #
     # NOTE: Bash also respects the GLOBIGNORE variable, but no other shells
     # do.  Could a default GLOBIGNORE to ignore flags on the file system be
     # part of the security solution?  It doesn't seem totally sound.
 
-    # shopt: why the difference?  No command line switch I guess.
-    self.dotglob = False  # dotfiles are matched
-    self.globstar = False  # ** for directories
-    # globasciiranges - ascii or unicode char classes (unicode by default)
-    # nocaseglob
-    # extglob: the !() syntax
+  def Expand(self, arg, out):
+    # type: (str, List[str]) -> int
+    """Given a string that could be a glob, append a list of strings to 'out'.
 
-    # TODO: Figure out which ones are in other shells, and only support those?
-    # - Include globstar since I use it, and zsh has it.
-
-  def Expand(self, arg):
-    """Given a string that could be a glob, return a list of strings."""
-    # e.g. don't glob 'echo' because it doesn't look like a glob
+    Returns:
+      Number of items appended.
+    """
     if not LooksLikeGlob(arg):
-      u = _GlobUnescape(arg)
-      return [u]
-    if self.exec_opts.noglob:
-      return [arg]
+      # e.g. don't glob 'echo' because it doesn't look like a glob
+      out.append(GlobUnescape(arg))
+      return 1
+    if self.exec_opts.noglob():
+      # we didn't glob escape it in osh/word_eval.py
+      out.append(arg)
+      return 1
 
     try:
-      #g = glob.glob(arg)  # Bad Python glob
-      # PROBLEM: / is significant and can't be escaped!  Have to avoid
-      # globbing it.
-      g = libc.glob(arg)
-    except Exception as e:
-      # - [C\-D] is invalid in Python?  Regex compilation error.
-      # - [:punct:] not supported
-      print("Error expanding glob %r: %s" % (arg, e))
+      results = libc.glob(arg)
+    except RuntimeError as e:
+      # These errors should be rare: I/O error, out of memory, or unknown
+      # There are no syntax errors.  (But see comment about globerr() in
+      # native/libc.c.)
+      # note: MyPy doesn't know RuntimeError has e.message (and e.args)
+      msg = e.message  # type: str
+      stderr_line("Error expanding glob %r: %s", arg, msg)
       raise
     #log('glob %r -> %r', arg, g)
 
-    if g:
-      return g
-    else:  # Nothing matched
-      if self.exec_opts.failglob:
-        # TODO: Make the command return status 1.
-        raise NotImplementedError
-      if self.exec_opts.nullglob:
-        return []
-      else:
-        # Return the original string
-        u = _GlobUnescape(arg)
-        return [u]
+    n = len(results)
+    if n:  # Something matched
+      for name in results:
+        # Omit files starting with - to solve the --.
+        # dash_glob turned OFF with shopt -s oil:basic.
+        if name.startswith('-') and not self.exec_opts.dashglob():
+          n -= 1
+          continue
+        out.append(name)
+      return n
+
+    # Nothing matched
+    #if self.exec_opts.failglob():
+      # note: to match bash, the whole command has to return 1.  But this also
+      # happens in for loop and array literal contexts.  It might not be worth
+      # it?
+    #  raise NotImplementedError()
+
+    if self.exec_opts.nullglob():
+      return 0
+
+    # Return the original string
+    out.append(GlobUnescape(arg))
+    return 1
+
+  def OilFuncCall(self, arg):
+    # type: (str) -> List[str]
+    """User-facing function."""
+    out = []  # type: List[str]
+    self.Expand(arg, out)
+    return out

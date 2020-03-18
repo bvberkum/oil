@@ -1,4 +1,3 @@
-#!/usr/bin/python
 from __future__ import print_function
 """
 deps.py
@@ -6,20 +5,12 @@ deps.py
 
 import sys
 
-from asdl import runtime
+from _devbuild.gen.syntax_asdl import command
+from asdl import pybase
+from core.util import log
+from frontend import consts
+from osh import word_
 
-from core import util
-from core.meta import syntax_asdl, runtime_asdl
-
-from osh import ast_lib
-from osh import builtin
-from osh import word
-
-command = syntax_asdl.command
-command_e = syntax_asdl.command_e
-
-builtin_e = runtime_asdl.builtin_e
-log = util.log
 
 # TODO: Move to asdl/visitor.py?
 class Visitor(object):
@@ -28,7 +19,7 @@ class Visitor(object):
   # I'm using ASDL metaprogramming instead.
 
   def Visit(self, node):
-    raise NotImplementedError
+    raise NotImplementedError()
 
   # Like ast.NodeVisitor().generic_visit!
   def VisitChildren(self, node):
@@ -38,7 +29,7 @@ class Visitor(object):
     """
     #print 'CHILD', node.ASDL_TYPE
 
-    for name, _ in node.ASDL_TYPE.GetFields():
+    for name in node.__slots__:
       child = getattr(node, name)
       #log('Considering child %s', name)
 
@@ -49,11 +40,11 @@ class Visitor(object):
           # type basis, because sums can look liek this:
           # iterable = IterArgv | IterArray(word* words)
           # We visit the latter but not the former.
-          if isinstance(item, runtime.CompoundObj):
+          if isinstance(item, pybase.CompoundObj):
             self.Visit(item)
         continue
 
-      if isinstance(child, runtime.CompoundObj):
+      if isinstance(child, pybase.CompoundObj):
         #log('Visiting child %s', name)
         self.Visit(child)
         continue
@@ -88,14 +79,14 @@ class DepsVisitor(Visitor):
     #log('VISIT %s', node.__class__.__name__)
 
     # NOTE: The tags are not unique!!!  We would need this:
-    # if isinstance(node, ast.command) and node.tag == command_e.SimpleCommand:
+    # if isinstance(node, ast.command) and node.tag == command_e.Simple:
     # But it's easier to check the __class__ attribute.
 
     cls = node.__class__
-    if cls is command.SimpleCommand:
+    if cls is command.Simple:
       #log('SimpleCommand %s', node.words)
       #log('--')
-      #ast_lib.PrettyPrint(node)
+      #node.PrettyPrint()
 
       # Things to consider:
       # - source and .
@@ -109,13 +100,14 @@ class DepsVisitor(Visitor):
         return
 
       w = node.words[0]
-      ok, argv0, _ = word.StaticEval(w)
+      ok, argv0, _ = word_.StaticEval(w)
       if not ok:
         log("Couldn't statically evaluate %r", w)
         return
 
-      if (builtin.ResolveSpecial(argv0) == builtin_e.NONE and
-          builtin.Resolve(argv0) == builtin_e.NONE):
+      if (consts.LookupSpecialBuiltin(argv0) == consts.NO_INDEX and
+          consts.LookupAssignBuiltin(argv0) == consts.NO_INDEX and
+          consts.LookupNormalBuiltin(argv0) == consts.NO_INDEX):
         self.progs_used[argv0] = True
 
       # NOTE: If argv1 is $0, then we do NOT print a warning!
@@ -123,7 +115,7 @@ class DepsVisitor(Visitor):
         if len(node.words) < 2:
           return
         w1 = node.words[1]
-        ok, argv1, _ = word.StaticEval(w1)
+        ok, argv1, _ = word_.StaticEval(w1)
         if not ok:
           log("Couldn't statically evaluate %r", w)
           return
@@ -131,7 +123,7 @@ class DepsVisitor(Visitor):
         # Should we mark them behind 'sudo'?  e.g. "sudo apt install"?
         self.progs_used[argv1] = True
 
-    elif cls is command.FuncDef:
+    elif cls is command.ShFunction:
       self.funcs_defined[node.name] = True
 
   def Visit(self, node):

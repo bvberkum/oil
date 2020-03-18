@@ -29,8 +29,8 @@ from .ast import *
 from .consts import CO_VARARGS, CO_VARKEYWORDS
 from .consts import OP_ASSIGN, OP_DELETE, OP_APPLY
 
-from ..pgen2 import token
 from ..pytree import type_repr
+from pgen2 import token
 
 
 symbol = None
@@ -807,7 +807,7 @@ class Transformer(object):
         return node
 
     def power(self, nodelist):
-        # power: atom trailer* ('**' factor)*
+        # power: atom trailer* ['**' factor]
         node = self.com_node(nodelist[0])
         for i in range(1, len(nodelist)):
             elt = nodelist[i]

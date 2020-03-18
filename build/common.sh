@@ -7,7 +7,8 @@ set -o errexit
 # TODO: This changes depending on the version.  Maybe there should be a 'clang'
 # function for things that really require clang, like code coverage and so
 # forth.
-readonly CLANG_DIR=$PWD/_deps/clang+llvm-5.0.1-x86_64-linux-gnu-ubuntu-16.04
+readonly CLANG_DIR_RELATIVE='_deps/clang+llvm-5.0.1-x86_64-linux-gnu-ubuntu-16.04'
+readonly CLANG_DIR=$PWD/$CLANG_DIR_RELATIVE
 readonly CLANG=$CLANG_DIR/bin/clang
 readonly CLANGXX=$CLANG_DIR/bin/clang++
 
@@ -18,8 +19,8 @@ readonly PY27=Python-2.7.13
 
 readonly PREPARE_DIR=_devbuild/cpython-full
 
-# Used by scripts/run.sh and opy/build.sh
-readonly OIL_SYMLINKS=(oil oilc osh oshc sh wok boil true false readlink)
+# Used by misc/bin.sh and opy/build.sh
+readonly OIL_SYMLINKS=(oil oilc osh oshc sh true false readlink)
 readonly OPY_SYMLINKS=(opy opyc)
 
 

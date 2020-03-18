@@ -9,7 +9,7 @@ set -o errexit
 
 source test/common.sh
 
-readonly SMALL_FILE='core/word_compile_test.py'
+readonly SMALL_FILE='osh/word_compile_test.py'
 
 # Can't be readonly because we override it below?  Gah.
 #readonly OPYC=${OPYC:-bin/opyc}
@@ -106,6 +106,14 @@ all-passing() {
 }
 
 # Use the release binary
+# NOTE: This longer builds because of a hashlib dependency?
+#
+# $ make _bin/opy.ovm-dbg
+# ...
+# /Modules/_hashopenssl.c:938: undefined reference to `EVP_get_digestbyname'
+# /home/andy/git/oilshell/oil/Python-2.7.13/Modules/_hashopenssl.c:938: undefined reference to `EVP_DigestInit'
+# collect2: error: ld returned 1 exit status
+
 run-for-release() {
   OPYC=_bin/opyc $0 run-all "${PASSING[@]}"
 }

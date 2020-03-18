@@ -24,13 +24,46 @@ echo ${unset-is unset}
 #### Unquoted with array as default value
 set -- '1 2' '3 4'
 argv.py X${unset=x"$@"x}X
-## stdout: ['Xx1', '2', '3', '4xX']
+argv.py X${unset=x$@x}X  # If you want OSH to split, write this
+# osh
+## STDOUT:
+['Xx1', '2', '3', '4xX']
+['Xx1', '2', '3', '4xX']
+## END
+## OK osh STDOUT:
+['Xx1 2', '3 4xX']
+['Xx1', '2', '3', '4xX']
+## END
 
 #### Quoted with array as default value
 set -- '1 2' '3 4'
 argv.py "X${unset=x"$@"x}X"
-## stdout: ['Xx1 2 3 4xX']
-## BUG bash stdout: ['Xx1', '2', '3', '4xX']
+argv.py "X${unset=x$@x}X"  # OSH is the same here
+## STDOUT:
+['Xx1 2 3 4xX']
+['Xx1 2 3 4xX']
+## END
+## BUG bash STDOUT:
+['Xx1', '2', '3', '4xX']
+['Xx1 2 3 4xX']
+## END
+## OK osh STDOUT:
+['Xx1 2', '3 4xX']
+['Xx1 2 3 4xX']
+## END
+
+#### Assign default with array
+set -- '1 2' '3 4'
+argv.py X${unset=x"$@"x}X
+argv.py "$unset"
+## STDOUT:
+['Xx1', '2', '3', '4xX']
+['x1 2 3 4x']
+## END
+## OK osh STDOUT:
+['Xx1 2', '3 4xX']
+['x1 2 3 4x']
+## END
 
 #### Assign default value when empty
 empty=''
@@ -42,15 +75,6 @@ echo $empty
 ${unset=is unset}
 echo $unset
 ## stdout: is unset
-
-#### Assign default with array
-#    HMMMM osh stdout-json: "['Xx1 2', '3 4xX']\n['x1 2 3 4x']\n"
-#    I think OSH diverges here because VTest is different than VOp1?
-#    I parse all the arg words the same way.
-set -- '1 2' '3 4'
-argv.py X${unset=x"$@"x}X
-argv.py "$unset"
-## stdout-json: "['Xx1', '2', '3', '4xX']\n['x1 2 3 4x']\n"
 
 #### Alternative value when empty
 v=foo
@@ -65,12 +89,16 @@ echo ${v+v is not unset} ${unset:+is not unset}
 
 #### Error when empty
 empty=''
-${empty:?is empty}
+echo ${empty:?'is em'pty}  # test eval of error
+echo should not get here
+## stdout-json: ""
 ## status: 1
 ## OK dash status: 2
 
 #### Error when unset
-${unset?is empty}
+echo ${unset?is empty}
+echo should not get here
+## stdout-json: ""
 ## status: 1
 ## OK dash status: 2
 
@@ -78,3 +106,17 @@ ${unset?is empty}
 v=foo
 echo ${v+v is not unset} ${unset:+is not unset}
 ## stdout: v is not unset
+
+#### ${var=x} dynamic scope
+f() { : "${hello:=x}"; echo $hello; }
+f
+echo hello=$hello
+
+f() { hello=x; }
+f
+echo hello=$hello
+## STDOUT:
+x
+hello=x
+hello=x
+## END

@@ -1,0 +1,55 @@
+a:link {
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* where help-index.html links to h2 in help.html */
+.group-link {
+  font-family: monospace;
+  color: darkgreen;
+}
+
+h1 {
+  font-size: 1.4em;
+}
+
+h2 {
+  font-size: 1.2em;
+}
+
+/* Copied from manual.css */
+p code, li code, h2 code, h3 code, div code {
+  background-color: #eee;
+  padding: 4px;
+}
+
+/*
+  Tried columns, but it didn't fit on one screen.  And it's not that portable.
+  40em works in Chrome, but not in Firefox? 
+
+#groups {
+  padding-top: 1em;
+
+  columns: 2;
+  column-width: 30em;
+}
+*/
+
+#sublang {
+  /* Works in Chrome but not Firefox? */
+  break-after: column;
+}
+
+
+/* blocks of code */
+pre {
+  /* 80 character width */
+  width: 80ch;
+}
+
+#compact-title {
+  font-weight: bold;
+  float: left;
+}

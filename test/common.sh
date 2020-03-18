@@ -14,7 +14,7 @@ readonly __TEST_COMMON_SH=1
 readonly OSH=${OSH:-bin/osh}
 
 # For xargs -P in spec-runner.sh, wild-runner.sh.
-readonly JOBS=$(( $(nproc) - 1 ))
+MAX_PROCS=${MAX_PROCS:-$(( $(nproc) - 1 ))}
 
 readonly R_PATH=~/R  # Like PYTHONPATH, but for running R scripts
 
@@ -42,9 +42,9 @@ run-task-with-status() {
   shift
 
   # --quiet suppresses a warning message
-  /usr/bin/env time \
+  benchmarks/time_.py \
+    --tsv \
     --output $out_file \
-    --format '%x %e' \
     -- "$@" || true  # suppress failure
 
   # Hack to get around the fact that --quiet is Debian-specific:
@@ -63,7 +63,7 @@ run-task-with-status-test() {
   test "$(wc -l < _tmp/status.txt)" = '1' || die "Expected only one line"
 }
 
-# Each test file should define PASSING
+# TODO: We should run them like $0?  To get more fine-grained reporting.
 run-all() {
   for t in "$@"; do
     # fail calls 'exit 1'
@@ -79,20 +79,31 @@ run-all() {
 run-other-suite-for-release() {
   local suite_name=$1
   local func_name=$2
+  local out=${3:-_tmp/other/${suite_name}.txt}
 
-  local out=_tmp/other/${suite_name}.txt
   mkdir -p $(dirname $out)
 
   echo
   echo "*** Running test suite '$suite_name' ***"
   echo
 
-  if $func_name 2>&1 | tee $out; then
+  # I want to handle errors in $func_name while NOT changing its semantics.
+  # This requires a separate shell interpreter starts with $0, not just a
+  # separate process.  I came up with this fix in gold/errexit-confusion.sh.
+
+  local status=0
+
+  set +o errexit
+  $0 $func_name >$out 2>&1
+  status=$?  # pipefail makes this work.
+  set -o errexit
+
+  if test $status -eq 0; then
     echo
-    log "Test suite '$suite_name' ran without errors.  Wrote $out"
+    log "Test suite '$suite_name' ran without errors.  Wrote '$out'"
   else
     echo
-    die "Test suite '$suite_name' failed (running $func_name)"
+    die "Test suite '$suite_name' failed (running $func_name, wrote '$out')"
   fi
 }
 
@@ -110,6 +121,11 @@ date-and-git-info() {
   echo
 }
 
-if test "$(basename $0)" = 'common.sh'; then
+html-head() {
+  PYTHONPATH=. doctools/html_head.py "$@"
+}
+
+filename=$(basename $0)
+if test "$filename" = 'common.sh'; then
   "$@"
 fi

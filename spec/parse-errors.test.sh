@@ -88,16 +88,17 @@ FOO-BAR=foo
 #### bad var name in export
 # bash and dash disagree on exit code.
 export FOO-BAR=foo
-## status: 2
-## OK bash/mksh status: 1
+## status: 1
+## OK dash status: 2
 
 #### bad var name in local
 # bash and dash disagree on exit code.
 f() {
   local FOO-BAR=foo
 }
-## status: 2
-## BUG dash/bash/mksh status: 0
+f
+## status: 1
+## OK dash status: 2
 
 #### misplaced parentheses are not a subshell
 echo a(b)
@@ -126,3 +127,69 @@ echo 1 ;; echo 2
 ## status: 2
 ## N-I dash status: 0
 ## OK mksh status: 1
+
+#### interactive parse error (regression)
+flags=''
+case $SH in
+  *bash|*osh)
+    flags='--rcfile /dev/null'
+    ;;
+esac  
+$SH $flags -i -c 'var=)'
+
+## status: 2
+## OK bash/mksh status: 1
+
+#### array literal inside array is a parse error
+a=( inside=() )
+echo len=${#a[@]}
+## status: 2
+## stdout-json: ""
+## OK mksh status: 1
+## BUG bash status: 0
+## BUG bash stdout: len=0
+
+#### array literal inside loop is a parse error
+f() {
+  for x in a=(); do
+    echo $x
+  done
+  echo done
+}
+## status: 2
+## stdout-json: ""
+## OK mksh status: 1
+
+#### array literal in case
+f() {
+  case a=() in
+    foo)
+      echo hi
+      ;;
+  esac
+}
+## status: 2
+## stdout-json: ""
+## OK mksh status: 1
+
+#### %foo=() is parse error (regression)
+
+# Lit_VarLike and then (, but NOT at the beginning of a word.
+
+f() {
+  %foo=()
+}
+## status: 2
+## stdout-json: ""
+## OK mksh status: 1
+
+#### =word is not allowed
+=word
+## OK osh status: 2
+## status: 127
+
+#### echo =word is allowed
+echo =word
+## STDOUT:
+=word
+## END

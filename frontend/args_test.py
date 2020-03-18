@@ -1,11 +1,19 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 """
 args_test.py: Tests for args.py
 """
 
 import unittest
 
+from _devbuild.gen.runtime_asdl import cmd_value
+from asdl import runtime
 from frontend import args  # module under test
+
+
+def _MakeBuiltinArgv(argv):
+  argv = [''] + argv  # add dummy since arg_vec includes argv[0]
+  # no location info
+  return cmd_value.Argv(argv, [runtime.NO_SPID] * len(argv))
 
 
 class ArgsTest(unittest.TestCase):
@@ -105,20 +113,38 @@ class ArgsTest(unittest.TestCase):
     s.ShortFlag('-n')
     s.ShortFlag('-d', args.Str)  # delimiter
 
-    arg, i = s.Parse(['-f', 'foo', 'bar'])
-    self.assertEqual(1, i)
+    # like declare +rx
+    s.ShortOption('r')
+    s.ShortOption('x')
+
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-f', 'foo', 'bar']))
+    self.assertEqual(1, i-1)
     self.assertEqual(True, arg.f)
     self.assertEqual(None, arg.n)
 
-    self.assertRaises(args.UsageError, s.Parse, ['-f', '-d'])
+    self.assertRaises(
+        args.UsageError, s.ParseCmdVal, _MakeBuiltinArgv(['-f', '-d']))
 
-    arg, i = s.Parse(['-d', ' ', 'foo'])
-    self.assertEqual(2, i)
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-d', ' ', 'foo']))
+    self.assertEqual(2, i-1)
     self.assertEqual(' ', arg.d)
 
-    arg, i = s.Parse(['-d,',  'foo'])
-    self.assertEqual(1, i)
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-d,',  'foo']))
+    self.assertEqual(1, i-1)
     self.assertEqual(',', arg.d)
+    self.assertEqual(None, arg.r)
+
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-d,', '-r', '-x']))
+    self.assertEqual(4, i)
+    self.assertEqual(',', arg.d)
+    self.assertEqual('-', arg.r)
+    self.assertEqual('-', arg.x)
+
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-d,', '+rx']))
+    self.assertEqual(3, i)
+    self.assertEqual(',', arg.d)
+    self.assertEqual('+', arg.r)
+    self.assertEqual('+', arg.x)
 
   def testReadBuiltinFlags(self):
     s = args.BuiltinFlags()
@@ -126,37 +152,37 @@ class ArgsTest(unittest.TestCase):
     s.ShortFlag('-t', args.Float)  # timeout
     s.ShortFlag('-p', args.Str)  # prompt string
 
-    arg, i = s.Parse(['-r', 'foo'])
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-r', 'foo']))
     self.assertEqual(True, arg.r)
-    self.assertEqual(1, i)
+    self.assertEqual(1, i-1)
 
-    arg, i = s.Parse(['-p', '>'])
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-p', '>']))
     self.assertEqual(None, arg.r)
     self.assertEqual('>', arg.p)
-    self.assertEqual(2, i)
+    self.assertEqual(2, i-1)
 
-    arg, i = s.Parse(['-rp', '>'])
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-rp', '>']))
     self.assertEqual(True, arg.r)
     self.assertEqual('>', arg.p)
-    self.assertEqual(2, i)
+    self.assertEqual(2, i-1)
 
     # REALLY ANNOYING: The first r is a flag, the second R is the prompt!  Only
     # works in that order
     # Does that mean anything with an arity consumes the rest?
     # read -p line
     #
-    arg, i = s.Parse(['-rpr'])
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(['-rpr']))
     self.assertEqual(True, arg.r)
     self.assertEqual('r', arg.p)
-    self.assertEqual(1, i)
+    self.assertEqual(1, i-1)
 
     argv = ['-t1.5', '>']
-    arg, i = s.Parse(argv)
+    arg, i = s.ParseCmdVal(_MakeBuiltinArgv(argv))
     self.assertEqual(1.5, arg.t)
-    self.assertEqual(1, i)
+    self.assertEqual(1, i-1)
 
     # Invalid flag 'z'
-    self.assertRaises(args.UsageError, s.Parse, ['-rz'])
+    self.assertRaises(args.UsageError, s.ParseCmdVal, _MakeBuiltinArgv(['-rz']))
 
   def testParseLikeEcho(self):
     s = args.BuiltinFlags()
@@ -184,43 +210,43 @@ class ArgsTest(unittest.TestCase):
     s.Flag('-out-file', args.Str)
     s.Flag('-retries', args.Int)
 
-    arg, i = s.Parse(['-docstring=0', 'x', 'y'])
+    arg, i = s.ParseArgv(['-docstring=0', 'x', 'y'])
     self.assertEqual(False, arg.docstring)
     self.assertEqual(None, arg.out_file)
     self.assertEqual(1, i)
 
     # This turns it on too
-    arg, i = s.Parse(['-docstring', '0', 'x', 'y'])
+    arg, i = s.ParseArgv(['-docstring', '0', 'x', 'y'])
     self.assertEqual(True, arg.docstring)
     self.assertEqual(None, arg.out_file)
     self.assertEqual(1, i)
 
-    arg, i = s.Parse(['-out-file', 'out', 'y'])
+    arg, i = s.ParseArgv(['-out-file', 'out', 'y'])
     self.assertEqual(True, arg.docstring)
     self.assertEqual('out', arg.out_file)
     self.assertEqual(2, i)
 
-    arg, i = s.Parse(['-retries', '3'])
+    arg, i = s.ParseArgv(['-retries', '3'])
     self.assertEqual(3, arg.retries)
 
-    arg, i = s.Parse(['-retries=3'])
+    arg, i = s.ParseArgv(['-retries=3'])
     self.assertEqual(3, arg.retries)
 
-    # Like GNU: anything that starts with -- is parsed like an option.
-    self.assertRaises(args.UsageError, s.Parse, ['---'])
+    # Like GNU: anything that starts with -- is parsed like an opt_num.
+    self.assertRaises(args.UsageError, s.ParseArgv, ['---'])
 
-    self.assertRaises(args.UsageError, s.Parse, ['-oops'])
+    self.assertRaises(args.UsageError, s.ParseArgv, ['-oops'])
 
     # Invalid boolean arg
-    self.assertRaises(args.UsageError, s.Parse, ['--docstring=YEAH'])
+    self.assertRaises(args.UsageError, s.ParseArgv, ['--docstring=YEAH'])
 
-    arg, i = s.Parse(['--'])
+    arg, i = s.ParseArgv(['--'])
     self.assertEqual(1, i)
 
-    arg, i = s.Parse(['-'])
+    arg, i = s.ParseArgv(['-'])
     self.assertEqual(0, i)
 
-    arg, i = s.Parse(['abc'])
+    arg, i = s.ParseArgv(['abc'])
     self.assertEqual(0, i)
 
   def testFlagRegex(self):

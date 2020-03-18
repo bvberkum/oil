@@ -195,7 +195,6 @@ echo-x echo-x
 x echo x
 ## END
 
-
 #### Invalid syntax of alias
 shopt -s expand_aliases  # bash requires this
 alias echo_alias_= 'echo --; echo'  # bad space here
@@ -245,6 +244,8 @@ e_ $i; done
 2
 3
 ## END
+## OK osh stdout-json: ""
+## OK osh status: 2
 
 #### Loop split across both iterative and recursive aliases
 shopt -s expand_aliases  # bash requires this
@@ -261,6 +262,8 @@ FOR2 eye2 IN onetwo 3; do echo $i; done
 2
 3
 ## END
+## OK osh stdout-json: ""
+## OK osh status: 2
 ## BUG zsh stdout-json: ""
 
 #### Alias with a quote in the middle is a syntax error
@@ -320,14 +323,13 @@ echo $(alias sayhi='echo hello')
 sayhi
 ## status: 127
 
-#### Alias doesn't work on a single line!
+#### Alias can be defined and used on a single line
+shopt -s expand_aliases
 alias sayhi='echo hello'; sayhi same line
 sayhi other line
 ## STDOUT:
 hello other line
 ## END
-## BUG bash stdout-json: ""
-## BUG bash status: 127
 
 #### Alias is respected inside eval
 shopt -s expand_aliases
@@ -343,12 +345,12 @@ hello outside
 ## END
 
 #### alias with redirects works
+shopt -s expand_aliases
 alias e_=echo
 >$TMP/alias1.txt e_ 1
 e_ >$TMP/alias2.txt 2
 e_ 3 >$TMP/alias3.txt
 cat $TMP/alias1.txt $TMP/alias2.txt $TMP/alias3.txt
-## BUG bash stdout-json: ""
 ## STDOUT:
 1
 2
@@ -356,16 +358,13 @@ cat $TMP/alias1.txt $TMP/alias2.txt $TMP/alias3.txt
 ## END
 
 #### alias with environment bindings works
+shopt -s expand_aliases
 alias p_=printenv.py
 FOO=1 printenv.py FOO
 FOO=2 p_ FOO
 ## STDOUT:
 1
 2
-## END
-## BUG bash status: 127
-## BUG bash STDOUT:
-1
 ## END
 
 #### alias with line continuation in the middle
@@ -388,6 +387,8 @@ LEFT echo one; echo two; }
 one
 two
 ## END
+## OK osh stdout-json: ""
+## OK osh status: 2
 
 #### alias for left paren
 shopt -s expand_aliases
@@ -397,6 +398,8 @@ LEFT echo one; echo two )
 one
 two
 ## END
+## OK osh stdout-json: ""
+## OK osh status: 2
 
 #### alias used in subshell and command sub
 # This spec seems to be contradictoary?
@@ -424,6 +427,19 @@ EOF
 [ ]
 ## END
 
+#### here doc inside alias
+shopt -s expand_aliases
+alias c='cat <<EOF
+$(echo hi)
+EOF
+'
+c
+## STDOUT:
+hi
+## END
+## BUG bash stdout-json: ""
+## BUG bash status: 127
+
 #### Corner case: alias inside LHS array arithmetic expression
 shopt -s expand_aliases
 alias zero='echo 0'
@@ -437,3 +453,70 @@ argv.py "${a[@]}"
 ## N-I dash status: 2
 ## N-I zsh stdout-json: ""
 ## N-I zsh status: 1
+
+#### Alias that is pipeline
+shopt -s expand_aliases
+alias t1='echo hi|wc -c'
+t1
+## STDOUT:
+3
+## END
+
+#### Alias that is && || ;
+shopt -s expand_aliases
+alias t1='echo one && echo two && echo 3 | wc -l;
+echo four'
+t1
+## STDOUT:
+one
+two
+1
+four
+## END
+
+#### Alias and command sub (bug regression)
+cd $TMP
+shopt -s expand_aliases
+echo foo bar > tmp.txt
+alias a=argv.py
+a `cat tmp.txt`
+## stdout: ['foo', 'bar']
+
+#### Alias and arithmetic
+shopt -s expand_aliases
+alias a=argv.py
+a $((1 + 2))
+## stdout: ['3']
+
+#### Alias and PS4
+# dash enters an infinite loop!
+case $SH in
+  dash)
+    exit 1
+    ;;
+esac
+
+set -x
+PS4='+$(echo trace) '
+shopt -s expand_aliases
+alias a=argv.py
+a foo bar
+## stdout: ['foo', 'bar']
+## BUG dash status: 1
+## BUG dash stdout-json: ""
+
+#### alias with keywords
+# from issue #299
+shopt -s expand_aliases
+alias a=
+
+# both of these fail to parse in OSH
+# this is because of our cleaner evaluation model
+
+a (( var = 0 ))
+#a case x in x) true;; esac
+
+echo done
+## stdout: done
+## OK osh status: 2
+## OK osh stdout-json: ""

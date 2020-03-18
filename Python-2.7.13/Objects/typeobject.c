@@ -581,11 +581,16 @@ type_set_bases(PyTypeObject *type, PyObject *value, void *context)
 static PyObject *
 type_dict(PyTypeObject *type, void *context)
 {
+#ifdef OBJECTS_ONLY
+    /* Don't need __dict__ on types */
+    assert(0);
+#else
     if (type->tp_dict == NULL) {
         Py_INCREF(Py_None);
         return Py_None;
     }
     return PyDictProxy_New(type->tp_dict);
+#endif
 }
 
 static PyObject *
@@ -2054,6 +2059,7 @@ _unicode_to_string(PyObject *slots, Py_ssize_t nslots)
 }
 #endif
 
+#ifndef OBJECTS_ONLY
 /* Forward */
 static int
 object_init(PyObject *self, PyObject *args, PyObject *kwds);
@@ -2525,6 +2531,7 @@ type_new(PyTypeObject *metatype, PyObject *args, PyObject *kwds)
 
     return (PyObject *)type;
 }
+#endif
 
 /* Internal API to look for a name through the MRO.
    This returns a borrowed reference, and doesn't set an exception! */
@@ -2887,9 +2894,21 @@ PyTypeObject PyType_Type = {
     0,                                          /* tp_descr_get */
     0,                                          /* tp_descr_set */
     offsetof(PyTypeObject, tp_dict),            /* tp_dictoffset */
+
+#ifdef OBJECTS_ONLY
+    0,
+#else
     type_init,                                  /* tp_init */
+#endif
+
     0,                                          /* tp_alloc */
+
+#ifdef OBJECTS_ONLY
+    /* Can't create types!!! */
+    0,
+#else
     type_new,                                   /* tp_new */
+#endif
     PyObject_GC_Del,                            /* tp_free */
     (inquiry)type_is_gc,                        /* tp_is_gc */
 };
@@ -2937,6 +2956,7 @@ PyTypeObject PyType_Type = {
 
 */
 
+#ifndef OBJECTS_ONLY
 /* Forward */
 static PyObject *
 object_new(PyTypeObject *type, PyObject *args, PyObject *kwds);
@@ -3046,6 +3066,7 @@ object_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     }
     return type->tp_alloc(type, 0);
 }
+#endif
 
 static void
 object_dealloc(PyObject *self)
@@ -3221,6 +3242,8 @@ static PyGetSetDef object_getsets[] = {
     {0}
 };
 
+
+#ifndef OBJECTS_ONLY
 
 /* Stuff to implement __reduce_ex__ for pickle protocols >= 2.
    We fall back to helpers in copy_reg for:
@@ -3524,6 +3547,7 @@ object_reduce_ex(PyObject *self, PyObject *args)
 
     return _common_reduce(self, proto);
 }
+#endif  // OBJECTS_ONLY
 
 static PyObject *
 object_subclasshook(PyObject *cls, PyObject *args)
@@ -3673,9 +3697,22 @@ PyTypeObject PyBaseObject_Type = {
     0,                                          /* tp_descr_get */
     0,                                          /* tp_descr_set */
     0,                                          /* tp_dictoffset */
+
+#ifdef OBJECTS_ONLY
+    0,
+#else
     object_init,                                /* tp_init */
+#endif
+
     PyType_GenericAlloc,                        /* tp_alloc */
+
+#ifdef OBJECTS_ONLY
+    /* Don't need to instantiate user-defined types */
+    0,
+#else
     object_new,                                 /* tp_new */
+#endif
+
     PyObject_Del,                               /* tp_free */
 };
 
@@ -3685,6 +3722,10 @@ PyTypeObject PyBaseObject_Type = {
 static int
 add_methods(PyTypeObject *type, PyMethodDef *meth)
 {
+#ifdef OBJECTS_ONLY
+    /* Call the methods directly? */
+    return 0;
+#else
     PyObject *dict = type->tp_dict;
 
     for (; meth->ml_name != NULL; meth++) {
@@ -3694,19 +3735,27 @@ add_methods(PyTypeObject *type, PyMethodDef *meth)
             !(meth->ml_flags & METH_COEXIST))
                 continue;
         if (meth->ml_flags & METH_CLASS) {
+#ifdef OBJECTS_ONLY
+            assert(0);
+#else
             if (meth->ml_flags & METH_STATIC) {
                 PyErr_SetString(PyExc_ValueError,
                      "method cannot be both class and static");
                 return -1;
             }
             descr = PyDescr_NewClassMethod(type, meth);
+#endif
         }
         else if (meth->ml_flags & METH_STATIC) {
+#ifdef OBJECTS_ONLY
+            assert(0);
+#else
             PyObject *cfunc = PyCFunction_New(meth, NULL);
             if (cfunc == NULL)
                 return -1;
             descr = PyStaticMethod_New(cfunc);
             Py_DECREF(cfunc);
+#endif
         }
         else {
             descr = PyDescr_NewMethod(type, meth);
@@ -3719,11 +3768,14 @@ add_methods(PyTypeObject *type, PyMethodDef *meth)
             return -1;
     }
     return 0;
+#endif
 }
 
 static int
 add_members(PyTypeObject *type, PyMemberDef *memb)
 {
+    /* TODO: Oil can call the methods directly?  Not go through __dict__? */
+#ifndef OBJECTS_ONLY
     PyObject *dict = type->tp_dict;
 
     for (; memb->name != NULL; memb++) {
@@ -3739,9 +3791,11 @@ add_members(PyTypeObject *type, PyMemberDef *memb)
         }
         Py_DECREF(descr);
     }
+#endif
     return 0;
 }
 
+#ifndef OBJECTS_ONLY
 static int
 add_getset(PyTypeObject *type, PyGetSetDef *gsp)
 {
@@ -3763,6 +3817,7 @@ add_getset(PyTypeObject *type, PyGetSetDef *gsp)
     }
     return 0;
 }
+#endif
 
 #define BUFFER_FLAGS (Py_TPFLAGS_HAVE_GETCHARBUFFER | Py_TPFLAGS_HAVE_NEWBUFFER)
 
@@ -4168,8 +4223,13 @@ PyType_Ready(PyTypeObject *type)
             goto error;
     }
     if (type->tp_getset != NULL) {
+#ifdef OBJECTS_ONLY
+        /* Does builtin types use this? */
+        assert(0);
+#else
         if (add_getset(type, type->tp_getset) < 0)
             goto error;
+#endif
     }
 
     /* Calculate method resolution order */
@@ -4957,6 +5017,7 @@ static struct PyMethodDef tp_new_methoddef[] = {
 };
 #endif
 
+#ifndef OBJECTS_ONLY
 static int
 add_tp_new_wrapper(PyTypeObject *type)
 {
@@ -4974,6 +5035,7 @@ add_tp_new_wrapper(PyTypeObject *type)
     Py_DECREF(func);
     return 0;
 }
+#endif
 
 /* Slot wrappers that call the corresponding __foo__ slot.  See comments
    below at override_slots() for more explanation. */
@@ -5615,6 +5677,9 @@ call_attribute(PyObject *self, PyObject *attr, PyObject *name)
 static PyObject *
 slot_tp_getattr_hook(PyObject *self, PyObject *name)
 {
+#ifdef OBJECTS_ONLY
+    assert(0);
+#else
     PyTypeObject *tp = Py_TYPE(self);
     PyObject *getattr, *getattribute, *res;
     static PyObject *getattribute_str = NULL;
@@ -5665,6 +5730,7 @@ slot_tp_getattr_hook(PyObject *self, PyObject *name)
     }
     Py_DECREF(getattr);
     return res;
+#endif
 }
 
 static int
@@ -6277,6 +6343,9 @@ resolve_slotdups(PyTypeObject *type, PyObject *name)
 static slotdef *
 update_one_slot(PyTypeObject *type, slotdef *p)
 {
+#ifdef OBJECTS_ONLY
+    assert(0);
+#else
     PyObject *descr;
     PyWrapperDescrObject *d;
     void *generic = NULL, *specific = NULL;
@@ -6353,6 +6422,7 @@ update_one_slot(PyTypeObject *type, slotdef *p)
     else
         *ptr = generic;
     return p;
+#endif
 }
 
 /* In the type, update the slots whose slotdefs are gathered in the pp array.
@@ -6527,6 +6597,9 @@ recurse_down_subclasses(PyTypeObject *type, PyObject *name,
 static int
 add_operators(PyTypeObject *type)
 {
+#ifdef OBJECTS_ONLY
+    return 0;
+#else
     PyObject *dict = type->tp_dict;
     slotdef *p;
     PyObject *descr;
@@ -6564,6 +6637,7 @@ add_operators(PyTypeObject *type)
             return -1;
     }
     return 0;
+#endif
 }
 
 

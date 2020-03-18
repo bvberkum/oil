@@ -87,15 +87,20 @@ fi
 # http://tldp.org/LDP/abs/html/testconstructs.html#DBLBRACKETS
 
 #### Octal literals with -eq
+shopt -u strict_arith || true
 decimal=15
 octal=017   # = 15 (decimal)
 [[ $decimal -eq $octal ]] && echo true
 [[ $decimal -eq ZZZ$octal ]] || echo false
-## stdout-json: "true\nfalse\n"
+## STDOUT:
+true
+false
+## END
 ## N-I mksh stdout: false
 # mksh doesn't implement this syntax for literals.
 
 #### Hex literals with -eq
+shopt -u strict_arith || true
 decimal=15
 hex=0x0f    # = 15 (decimal)
 [[ $decimal -eq $hex ]] && echo true
@@ -122,10 +127,13 @@ hex=0x0f    # = 15 (decimal)
 
 #### -eq on strings 
 # This is lame behavior: it does a conversion to 0 first for any string
+shopt -u strict_arith || true
 [[ a -eq a ]] && echo true
 [[ a -eq b ]] && echo true
-## stdout-json: "true\ntrue\n"
-## OK bash/mksh stdout-json: "true\ntrue\n"
+## STDOUT: 
+true
+true
+## END
 
 #### [[ compare with literal -f (compare with test-builtin.test.sh)
 var=-f
@@ -161,25 +169,29 @@ FOO=bar [[ foo == foo ]]
 && bar == bar
 ]] && echo true
 ## status: 0
-## stdout-json: "true\n"
+## STDOUT:
+true
+## END
 
 #### Argument that looks like a command word operator
 [[ -f -f ]] || echo false
 [[ -f == ]] || echo false
-## stdout-json: "false\nfalse\n"
+## STDOUT:
+false
+false
+## END
 
 #### Argument that looks like a real operator
 [[ -f < ]] && echo 'should be parse error'
 ## status: 2
 ## OK mksh status: 1
 
-#### Does user array equal "$@" ?
-# Oh it coerces both to a string.  Lame.
-# I think it disobeys "${a[@]}", and treats it like an UNQUOTED ${a[@]}.
-# NOTE: set -o strict-array should make this invalid
-a=(1 3 5)
+#### User array compared to "$@" (broken unless shopt -s strict_array)
+# Both are coerced to string!  It treats it more like an  UNQUOTED ${a[@]}.
+
+a=('1 3' 5)
 b=(1 2 3)
-set -- 1 3 5
+set -- 1 '3 5'
 [[ "$@" = "${a[@]}" ]] && echo true
 [[ "$@" = "${b[@]}" ]] || echo false
 ## STDOUT:
@@ -187,9 +199,8 @@ true
 false
 ## END
 
-#### Array coerces to string
-# NOTE: set -o strict-array should make this invalid
-a=(1 3 5)
+#### Array coerces to string (shopt -s strict_array to disallow)
+a=('1 3' 5)
 [[ '1 3 5' = "${a[@]}" ]] && echo true
 [[ '1 3 4' = "${a[@]}" ]] || echo false
 ## STDOUT:
@@ -197,12 +208,40 @@ true
 false
 ## END
 
+#### (( array1 == array2 )) doesn't work
+a=('1 3' 5)
+b=('1 3' 5)
+c=('1' '3 5')
+d=('1' '3 6')
+
+# shells EXPAND a and b first
+(( a == b ))
+echo status=$?
+
+(( a == c ))
+echo status=$?
+
+(( a == d ))
+echo status=$?
+
+## stdout-json: ""
+## status: 1
+## BUG bash STDOUT:
+status=1
+status=1
+status=1
+## END
+## BUG bash status: 0
+
 #### Quotes don't matter in comparison
 [[ '3' = 3 ]] && echo true
 [[ '3' -eq 3 ]] && echo true
-## stdout-json: "true\ntrue\n"
+## STDOUT:
+true
+true
+## END
 
-#### -eq with arithmetic expression!
+#### -eq does dynamic arithmetic parsing (not supported in OSH)
 [[ 1+2 -eq 3 ]] && echo true
 expr='1+2'
 [[ $expr -eq 3 ]] && echo true  # must be dynamically parsed
@@ -210,8 +249,11 @@ expr='1+2'
 true
 true
 ## END
+## N-I osh stdout-json: ""
+## N-I osh status: 1
 
 #### -eq coercion produces weird results
+shopt -u strict_arith || true
 [[ '' -eq 0 ]] && echo true
 ## stdout: true
 
@@ -265,3 +307,46 @@ echo status=$?
 ## stdout-json: ""
 ## status: 2
 ## OK mksh status: 1
+
+#### [[ a 3< b ]] doesn't work (bug regression)
+[[ a 3< b ]]
+echo status=$?
+[[ a 3> b ]]
+echo status=$?
+## status: 2
+
+# Hm these shells use the same redirect trick that OSH used to!
+
+## BUG mksh/zsh status: 0
+## BUG mksh/zsh STDOUT:
+status=0
+status=1
+## END
+
+#### tilde expansion in [[
+HOME=/home/bob
+[[ ~ == /home/bob ]]
+echo status=$?
+
+[[ ~ == */bob ]]
+echo status=$?
+
+[[ ~ == */z ]]
+echo status=$?
+
+## STDOUT:
+status=0
+status=0
+status=1
+## END
+
+#### [[ ]] with redirect
+[[ $(stdout_stderr.py) == STDOUT ]] 2>$TMP/x.txt
+echo $?
+echo --
+cat $TMP/x.txt
+## STDOUT:
+0
+--
+STDERR
+## END

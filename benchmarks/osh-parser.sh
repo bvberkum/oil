@@ -4,6 +4,19 @@
 #
 # Usage:
 #   ./osh-parser.sh <function name>
+#
+# Hacky way to run it by itself:
+#
+#   devtools/release-native.sh make-tar
+#   devtools/release-native.sh extract-for-benchmarks
+#   devtools/release.sh benchmark-build
+#   make  # to build _bin/osh
+#   lisa:
+#     benchmark/auto.sh osh-parser-quick
+#   flanders:
+#     TODO: fix this.  sometimes we use _bin/osh_eval.*, and sometimes the
+#     ../benchmark-data/ version.
+#   benchmarks/report.sh osh-parser
 
 set -o nounset
 set -o pipefail
@@ -56,19 +69,26 @@ parser-task() {
 
   # Can't use array because of set -u bug!!!  Only fixed in bash 4.4.
   extra_args=''
-  if test "$shell_name" = 'osh'; then
-    local script_name
-    local vm_out_path
-    script_name=$(basename $script_path)
-    vm_out_path="${vm_out_dir}/${shell_name}-${shell_hash}__${script_name}.txt"
-    extra_args="--ast-format none --parser-mem-dump $vm_out_path"
+  case "$shell_name" in
+    osh)
+      local script_name
+      local vm_out_path
+      script_name=$(basename $script_path)
+      vm_out_path="${vm_out_dir}/${shell_name}-${shell_hash}__${script_name}.txt"
+      extra_args="--ast-format none --parser-mem-dump $vm_out_path"
 
-    # Should we add a field here to say it has VM stats?
-  fi
+      # Should we add a field here to say it has VM stats?
+      ;;
+
+    osh_eval.*)
+      extra_args='-a none'
+      ;;
+  esac
 
   # exit code, time in seconds, host_hash, shell_hash, path.  \0
   # would have been nice here!
-  benchmarks/time.py \
+  benchmarks/time_.py \
+    --append \
     --output $times_out \
     --field "$host" --field "$host_hash" \
     --field "$shell_name" --field "$shell_hash" \
@@ -194,19 +214,11 @@ stage1() {
 
 print-report() {
   local in_dir=$1
-  local base_url='../../web'
+
+  benchmark-html-head 'OSH Parser Performance'
 
   cat <<EOF
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>OSH Parser Performance</title>
-    <script type="text/javascript" src="$base_url/table/table-sort.js"></script>
-    <link rel="stylesheet" type="text/css" href="$base_url/table/table-sort.css" />
-    <link rel="stylesheet" type="text/css" href="$base_url/benchmarks.css" />
-
-  </head>
-  <body>
+  <body class="width60">
     <p id="home-link">
       <a href="/">oilshell.org</a>
     </p>
@@ -217,7 +229,7 @@ print-report() {
     elapsed time measurements, but long files are chosen to minimize its
     effect.</p>
 
-    <h3>Parse Time Summary</h3>
+    <h3>Average Parsing Rate, Measured on Two Machines (lines/ms)</h3>
 EOF
   csv2html $in_dir/summary.csv
 
@@ -259,8 +271,9 @@ EOF
 }
 
 time-test() {
-  benchmarks/time.py \
-    --field bash --field foo.txt --output _tmp/bench.csv \
+  benchmarks/time_.py \
+    --field bash --field foo.txt \
+    --append --output _tmp/bench.csv \
     sleep 0.123
   cat _tmp/bench.csv
 }

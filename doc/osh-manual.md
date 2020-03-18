@@ -1,176 +1,417 @@
-OSH Reference Manual
---------------------
+OSH User Manual
+===============
 
-NOTE: This Document is in Progress.
+OSH is a **Unix shell** designed to run existing shell scripts.  More
+precisely, it's
 
-## Parsing OSH vs. sh/bash
+1. POSIX-compatible
+2. Has features from GNU Bash, the most commonly used shell.
 
-(NOTE: This section should encompass all the failures from the [wild tests](http://oilshell.org/cross-ref.html?tag=wild-test#wild-test).)
+It's designed to be "stricter" than other shells.  To avoid programs that don't
+behave as intended,
 
-OSH is meant to run all POSIX shell programs and almost all bash
-programs.  But it's also designed to be more strict -- i.e. it's [statically
-parsed](http://www.oilshell.org/blog/2016/10/22.html) rather than dynamically
-parsed.
+1. It produces more errors.
+2. It produces them earlier &mdash; at parse time, if possible.
 
-Here is a list of differences from bash:
+"Batch" programs are most likely to run unmodified under OSH.  Interactive
+programs like `.bashrc` and bash completion scripts may require small changes.
 
-(1) **Array indexes that are strings should be quoted** (with either single or
-double quotes).
+This manual covers the **differences** between OSH and other shells.  It leaves
+the details of each construct to the `help` builtin and the [Quick
+Reference](osh-quick-ref.html) (*Warning: both are incomplete*).  It also
+doesn't cover the [Oil language][oil-language], which is a newer part of the
+Oil project.
 
-NO:
-
-    "${SETUP_STATE[$err.cmd]}"
-
-YES:
-
-    "${SETUP_STATE["$err.cmd"]}"
-
-The period causes an ambiguity with respect to regular arrays vs. associative
-arrays.  See [Parsing Bash is Undecidable](http://www.oilshell.org/blog/2016/10/20.html).
-
-
-(2) **Assignments can't have redirects.**
-
-NO:
-
-    x=abc >out.txt
-    x=${y} >out.txt
-    x=$((1 + 2)) >out.txt
-
-    # This is the only one that makes sense (can result in a non-empty file),
-    # but is still disallowed.
-    x=$(echo hi) >out.txt
-
-YES:
-
-    x=$(echo hi >out.txt)
+Existing educational materials for the Unix shell apply to OSH, because they
+generally don't teach the quirks that OSH disallows.  For example, much of the
+information and advice in [BashGuide][] can be used without worrying about
+which shell you're using.  See the end of this manual for more resources.
 
 
-(3) **Variable names must be static** -- they can't be variables themselves.
+[oil-language]: https://oilshell.org/cross-ref.html?tag=oil-language#oil-language
 
-NO:
+<!-- cmark.py expands this -->
+<div id="toc">
+</div>
 
-    declare "$1"=abc
+## Downloading OSH
 
-YES:
+The [releases page](https://www.oilshell.org/releases.html) links to source
+tarballs for every release.  It also links to the documentation tree, which
+includes this manual.
 
-    declare x=abc
+## Setup
+
+After running the instructions in [INSTALL](INSTALL.html), run:
+
+    mkdir -p ~/.config/oil
+
+- OSH will create `osh_history` there, to store your command history.
+- You can create your own `oshrc` there.
+
+## Startup Files
+
+On startup, the interactive shell sources **only** `~/.config/oil/oshrc`.
+
+Other shells [have a confusing initialization sequence involving many
+files][mess] ([original][]).  It's very hard to tell when and if
+`/etc/profile`, `~/.bashrc`, `~/.bash_profile`, etc. are executed.
+
+OSH intentionally avoids this.  If you want those files, simply `source` them
+in your `oshrc`.
+
+- For example, on Arch Linux and other distros,`$LANG` may not get set without
+  `/etc/profile`.  Add `source /etc/profile` to your `oshrc` may solve this
+  problem.
+- If you get tired of typing `~/.config/oil/oshrc`, symlink it to `~/.oshrc`.
+
+[mess]: https://shreevatsa.wordpress.com/2008/03/30/zshbash-startup-files-loading-order-bashrc-zshrc-etc/
+
+[original]: http://www.solipsys.co.uk/new/BashInitialisationFiles.html
+
+I describe my own `oshrc` file on the wiki: [How To Test
+OSH](https://github.com/oilshell/oil/wiki/How-To-Test-OSH).
 
 
-NOTE: It would be possible to allow this.  However in the Oil language, the
-two constructs will have different syntax.  For example, `x = 'abc'` vs.
-`setvar($1, 'abc')`.
+## Global Execution Options
 
-(4) **Disambiguating Arith Sub vs. Command Sub+Subshell**
+All Unix shells have global options that affect execution.  There are two
+kinds:
 
-NO:
+- POSIX options like `set -e`, which I prefer to write `set -o errexit`.
+- bash extensions like `shopt -s inherit_errexit`
 
-    $((cd / && ls))
+List them all with `set -o` and `shopt -p`.  Other than syntax, there's no
+essential difference between the two kinds.
 
-YES:
+### shopt -s strict:all is Recommended
 
-    $( (cd / && ls) )   # This is valid but usually doesn't make sense.
-                          # Because () means subshell, not grouping.
-    $({ cd / && ls; })  # {} means grouping.  Note trailing ;
-    $(cd / && ls)
+OSH adds more options on top of those provided by POSIX and bash.  It has  a
+shortcut `shopt -s strict:all` which turns on many options at once:
 
-Unlike bash, `$((` is always starts an arith sub.  `$( (echo hi) )` is a
-subshell inside a command sub.  (This construct should be written `({ echo
-hi;})` anyway.
+- `errexit`, `nounset` (`sh` modes to get more errors)
+- `pipefail` and `inherit_errexit` (`bash` modes to get more errors)
+- `nullglob` (a `bash` mode, doesn't confuse code and data)
+- `strict_*` (`strict_array`, etc.)
+   - Strict options **disallow** certain parts of the language with **fatal
+     runtime errors**.
 
-(5) **Disambiguating Extended Glob vs. Negation of Expression**
+If you want your script to be portable to other shells, use this line:
 
-- `[[ !(a == a) ]]` is always an extended glob.  
-- `[[ ! (a == a) ]]` is the negation of an equality test.
-  - In bash the rules are much more complicated, and depend on `shopt -s
-    extglob`.  That flag is a no-op in OSH.  OSH avoids dynamic parsing, while
-    bash does it in many places.
+    shopt -s strict:all 2>/dev/null || true  # suppress errors
 
-(6) **Here Doc Terminators Must Be On Their Own Line**
+You can also turn individual options on or off:
 
-NO:
+    shopt -s strict_array  # Set this option.  I want more fatal errors.
+    shopt -u strict_array  # Unset it.  Ignore errors and keep executing.
 
-    a=$(cat <<EOF
-    abc
-    EOF)
+### List of Options
 
-    a=$(cat <<EOF
-    abc
-    EOF  # not a comment, read as here doc delimiter
+`strict_arith`.  Strings that don't look like integers cause a fatal error in
+arithmetic expressions.
+
+`strict_argv`.  Empty `argv` arrays are disallowed, since there's no practical
+use for them.  For example, the second statement in `x=''; $x` results in a
+fatal error.
+
+`strict_array`. No implicit conversions between string an array.  In other
+words, turning this on gives you a "real" array type.
+
+`strict_control_flow`. `break` and `continue` outside of a loop are fatal
+errors.
+
+`strict_eval_builtin`.  The `eval` builtin takes exactly **one** argument.  It
+doesn't concatenate its arguments with a space, or accept zero arguments.
+
+`strict_word_eval`.  More word evaluation errors are fatal.
+
+- String slices with negative arguments like `${s: -1}` and `${s: 1 : -1}`
+  result in a fatal error.  (NOTE: In array slices, negative start indices are
+  allowed, but negative lengths are always fatal, regardless of
+  `strict-word-eval`.)
+- UTF-8 decoding errors are fatal when computing lengths (`${#s}`) and slices.
+
+See the [Oil manual](oil-manual.html) for options that fundamentally change the
+shell language, e.g. those categorized under `shopt -s oil:all`.
+
+## OSH Has Four `errexit` Options (while Bash Has Two)
+
+The complex behavior of these global execution options requires extra attention
+in this manual.
+
+But you don't need to understand all the details.  Simply choose between:
+
+```
+# Turn on four errexit options.  I don't run this script with other shells.
+shopt -s oil:all
+```
+
+and
+
+```
+# Turn on three errexit options.  I run this script with other shells.
+shopt -s strict:all
+```
+
+### Quirk 1: the Shell Sometimes Disables And Restores `errexit`
+
+Here's some background for understanding the additional `errexit` options
+described below.
+
+In all Unix shells, the `errexit` check is disabled in these situations:
+ 
+1. The condition of the `if`, `while`, and `until`  constructs
+2. A command/pipeline prefixed by `!`
+3. Every clause in `||` and `&&` except the last.
+
+Now consider this situation:
+
+1. `errexit` is **on**
+2. The shell disables it one of those three situations
+3. While disabled, the user touches it with `set -o errexit` (or `+o` to turn
+   it off).
+
+Surprising behavior: Unix shells **ignore** the `set` builtin for awhile,
+delaying its execution until **after** the temporary disablement.
+
+### Quirk 2: x=$(false) is inconsitent with local x=$(false)
+
+Background: In shell, `local` is a builtin rather than a keyword, which means
+`local foo=$(false)` behaves differently than than `foo=$(false)`.
+
+### Additional `errexit` options
+
+OSH aims to fix the many quirks of `errexit`.  It has this bash-compatible
+option:
+
+- `inherit_errexit`: `errexit` is inherited inside `$()`, so errors aren't
+  ignored.  It's enabled by both `strict:all` and `oil:all`.
+
+And two more options:
+
+- `strict_errexit` makes the quirk above irrelevant.  Compound commands,
+  including **functions**, can't be used in any of those three situations.  You
+  can write `set -o errexit || true`, but not `{ set -o errexit; false } ||
+  true`.  When this option is set, you get a runtime error indicating that you
+  should **change your code**.  Consider using the ["at-splice
+  pattern"][at-splice] to fix this, e.g. `$0 myfunc || echo errexit`.
+- `more_errexit`: Check more often for non-zero status.  In particular, the
+  failure of a command sub can abort the entire script.  For example, `local
+  foo=$(false)` is a fatal runtime error rather than a silent success.
+
+### Example
+
+When both `inherit_errexit` and `more_errexit` are on, this code
+
+    echo 0; echo $(touch one; false; touch two); echo 3
+
+will print `0` and touch the file `one`.
+
+1. The command sub aborts at `false` (`inherrit_errexit), and
+2. The parent process aborts after the command sub fails (`more_errexit`).
+
+### Recap/Summary
+
+- `errexit` -- abort the shell script when a command exits nonzero, except in
+  the three situations described above.
+- `inherit_errexit` -- A bash option that OSH borrows.
+- `strict_errexit` -- Turned on with `strict:all`.
+- `more_errexit` -- Turned on with `oil:all`.
+
+Good articles on `errexit`:
+
+- <http://mywiki.wooledge.org/BashFAQ/105>
+- <http://fvue.nl/wiki/Bash:_Error_handling>
+
+## Features Unique to OSH
+
+### Dumping the AST
+
+The `-n` flag tells OSH to parse the program rather than executing it.  By
+default, it prints an abbreviated abstract syntax tree:
+
+    $ bin/osh -n -c 'ls | wc -l'
+    (command.Pipeline children:[(C {(ls)}) (C {(wc)} {(-l)})] negated:F)
+
+You can also ask for the full `text` format:
+
+    $ bin/osh -n --ast-format text -c 'ls | wc -l'
+    (command.Pipeline
+      children: [
+        (command.Simple
+          words: [
+            (word.Compound
+              parts: [(word_part.Literal
+                       token:(token id:Lit_Chars val:ls span_id:0))]
+            )
+          ]
+        )
+        (command.Simple
+          words: [
+            (word.Compound
+              parts: [(word_part.Literal
+                       token:(token id:Lit_Chars val:wc span_id:4))]
+            )
+            (word.Compound
+              parts: [(word_part.Literal
+                       token:(token id:Lit_Chars val:-l span_id:6))]
+            )
+          ]
+        )
+      ]
+      negated: F
+      spids: [2]
     )
 
-YES:
+This format is **subject to change**.  It's there for debugging the parser, but
+sophisticated users may use it to interpret tricky shell programs without
+running them.
 
-    a=$(cat <<EOF
-    abc
-    EOF
-    )  # newline
 
-Just like `EOF]` will not end the here doc, `EOF)` doesn't end it either.  It
-must be on its own line.
+### `OSH_HIJACK_SHEBANG`
 
-<!-- 
-TODO: Add these
+This environment variable can be set to the path of a **shell**.  Before OSH
+executes a program, it will inspect the shebang line to see if it looks like a
+shell script.  If it does, it will use this shell instead of the one specified
+in the shebang line.
 
-- dynamic parsing of `$(( $a $op $b ))`.  OSH requires an explicit eval.
-- new one: `` as comments in sandstorm
-  # This relates to comments being EOL or not
--->
+For example, suppose you have `myscript.sh`:
 
-## set builtin
+    #!/bin/sh
+    # myscript.sh
 
-### errexit
+    ./otherscript.sh --flag ...
 
-It largely follows the logic of bash.  Any non-zero exit code causes a fatal
-error, except in:
- 
-  - the condition part of if / while / until
-  - a command/pipeline prefixed by !
-  - Every clause in || and && except the last
+and `otherscript.sh`:
 
-However, we fix two bugs with bash's behavior:
+    #!/bin/sh
+    # otherscript.sh
 
-  - failure in $() should be fatal, not ignored.  OSH behaves like dash and
-    mksh, not bash.
-  - failure in local foo=... should propagate.  
-    OSH diverges because this is arguably a bug in all shells -- `local` is
-    treated as a separate command, which means `local foo=bar` behaves
-    differently than than `foo=bar`.
+    echo 'hello world'
 
-Here is another difference:
+Then you can run `myscript.sh` like this:
 
-  - If 'set -o errexit' is active, and then we disable it (inside
-    if/while/until condition, !, && ||), and the user tries to 'set +o
-    errexit', back, then this is a fatal error.  Other shells delay setting
-    back until after the whole construct.
+    OSH_HIJACK_SHEBANG=osh osh myscript.sh
 
-Very good articles on bash errexit:
+and `otherscript.sh` will be executed with OSH rather than the `/bin/sh`.
 
-  - http://mywiki.wooledge.org/BashFAQ/105
-  - http://fvue.nl/wiki/Bash:_Error_handling
+Note that `osh` appears **twice** in that command line: once for the initial
+run, and once for all recursive runs.
+
+(This is an environment variable rather than a flag because it needs to be
+**inherited**.)
+
+
+### `--debug-file`
+
+Print internal debug logs to this file.  It's useful to make it a FIFO:
+
+    mkfifo _tmp/debug
+    osh --debug-file _tmp/debug
+
+Then run this in another window to see logs as you type:
+
+    cat _tmp/debug
+
+Related:
+
+- The `OSH_DEBUG_DIR` environment variable is the inherited version of
+  `--debug-file`.  A file named `$PID-osh.log` will be written in that
+  directory for every shell process.
+- The `--xtrace-to-debug-file` flag sends `set -o xtrace` output to that file
+  instead of to `stderr`.
+
+### Crash Dumps
+
+- TODO: `OSH_CRASH_DUMP_DIR`
+
+This is implemented, but a JSON library isn't in the release build.
+
+## Completion API
+
+The completion API is modeled after the [bash completion
+API](https://www.gnu.org/software/bash/manual/html_node/Command-Line-Editing.html#Command-Line-Editing)
+
+However, an incompatibility is that it deals with `argv` entries and not
+command strings.
+
+OSH moves the **responsibility for quoting** into the shell.  Completion
+plugins should not do it.
+
+- TODO: describe the `compadjust` builtin.  Derived from a cleanup of the
+  `bash-completion` project.
+
+## Exit Codes
+
+- `0` for **success**.
+- `1` for **runtime errors**.  Examples:
+  - `echo foo > out.txt` and `out.txt` can't be opened.
+  - `fg` and there's not job to put in the foreground.
+- `2` for **parse errors**.  This means that we didn't *attempt* to do
+  anything, rather than doing something and it failing.  Examples:
+  - A language parse error, like `echo $(`.
+  - Builtin usage error, like `read -z`.
+- `0` for **true**, and `1` for **false**.  Example:
+  - `test -f foo` and `foo` isn't a file.
+- POSIX exit codes:
+  - `126` for permission denied when running a command (`errno EACCES`)
+  - `127` for command not found
 
 ## Unicode
 
-Encoding of programs should be utf-8.
+### Program Encoding
 
-But those programs can manipulate data in ANY encoding?
+Shell **programs** should be encoded in UTF-8 (or its ASCII subset).  Unicode
+characters can be encoded directly in the source:
 
-    echo $'[\u03bc]'  # C-escaped string
+<pre>
+echo '&#x03bc;'
+</pre>
 
-vs literal unicode vs. `echo -e`.  `$''` is preferred because it's statically
-parsed.
+or denoted in ASCII with C-escaped strings, i.e.  `$''`:
 
-List of operations that are Unicode-aware:
+    echo $'[\u03bc]'
 
-- ${#s} -- number of characters in a string
-- slice: ${s:0:1}
-- any operations that uses glob, which has '.' and [[:alpha:]] expressions
-  - case
-  - [[ $x == . ]]
-  - ${s/./x}
-  - ${s#.}  # remove one character
-- sorting [[ $a < $b ]] -- should use current locale?  I guess that is like the
-  'sort' command.
-- prompt string has time, which is locale-specific.
+(This construct is preferred over `echo -e` because it's statically parsed.)
+
+### Data Encoding
+
+Strings in OSH are arbitrary sequences of **bytes**.  Caveats:
+
+- When passed to external programs, strings are truncated at the first `NUL`
+  (`'\0'`) byte.  This is just how Unix and C work.
+- The length operator `${#s}` and slicing `${s:1:3}` require their input to be
+  **valid UTF-8**.  Decoding errors are fatal if `shopt -s strict-word-eval` is
+  on.
+
+The GNU `iconv` program converts text from one encoding to another.
+
+Also see [Notes on Unicode in Shell][unicode.md].
+
+[unicode.md]: https://github.com/oilshell/oil/blob/master/doc/unicode.md
+
+## Bugs
+
+- OSH runs shell scripts too slowly.  Speeding it up is a top priority.
+
+## Links
+
+- [Blog Posts Tagged #FAQ](http://www.oilshell.org/blog/tags.html?tag=FAQ#FAQ)
+  tell you why OSH exists and how it's designed.
+- [Known Differences](known-differences.html) lists incompatibilities between
+  OSH and other shells.  They are unlikely to appear in real programs, or
+  there is a trivial workaround.
+
+External:
+
+- [GNU Bash Manual](https://www.gnu.org/software/bash/manual/).  I frequently
+  referred to this document when implementing OSH.
+- [BashGuide][].  A wiki with detailed information about bash.
+  - [BashPitfalls](https://mywiki.wooledge.org/BashPitfalls).
+- [Bash Cheat Sheet](https://devhints.io/bash).  A short overview.
+
+[BashGuide]: https://mywiki.wooledge.org/BashGuide
+
+[at-splice]: TODO
 
 

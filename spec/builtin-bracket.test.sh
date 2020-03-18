@@ -13,12 +13,20 @@ echo status=$?
 echo status=$?
 [ '(' ]
 echo status=$?
-## stdout-json: "status=0\nstatus=0\nstatus=0\nstatus=0\n"
+## STDOUT: 
+status=0
+status=0
+status=0
+status=0
+## END
 
 #### one arg: empty string is false.  Equivalent to -n.
 test 'a'  && echo true
 test ''   || echo false
-## stdout-json: "true\nfalse\n"
+## STDOUT:
+true
+false
+## END
 
 #### -a as unary operator (alias of -e)
 # NOT IMPLEMENTED FOR OSH, but could be later.  See comment in core/id_kind.py.
@@ -26,8 +34,14 @@ test ''   || echo false
 echo status=$?
 [ -a /nonexistent ]
 echo status=$?
-## stdout-json: "status=0\nstatus=1\n"
-## N-I dash stdout-json: "status=2\nstatus=2\n"
+## STDOUT:
+status=0
+status=1
+## END
+## N-I dash STDOUT:
+status=2
+status=2
+## END
 
 #### two args: -z with = ! ( ]
 [ -z = ]
@@ -38,7 +52,12 @@ echo status=$?
 echo status=$?
 [ -z '(' ]
 echo status=$?
-## stdout-json: "status=1\nstatus=1\nstatus=1\nstatus=1\n"
+## STDOUT: 
+status=1
+status=1
+status=1
+status=1
+## END
 
 #### three args
 [ foo = '' ]
@@ -51,14 +70,23 @@ echo status=$?
 echo status=$?
 [ \( foo \) ]
 echo status=$?
-## stdout-json: "status=1\nstatus=1\nstatus=0\nstatus=0\nstatus=0\n"
+## STDOUT: 
+status=1
+status=1
+status=0
+status=0
+status=0
+## END
 
 #### four args
 [ ! foo = foo ]
 echo status=$?
 [ \( -z foo \) ]
 echo status=$?
-## stdout-json: "status=1\nstatus=1\n"
+## STDOUT: 
+status=1
+status=1
+## END
 
 #### test with extra args is syntax error
 test -n x ]
@@ -92,7 +120,10 @@ status=2
 #### -n
 test -n 'a'  && echo true
 test -n ''   || echo false
-## stdout-json: "true\nfalse\n"
+## STDOUT:
+true
+false
+## END
 
 #### ! -a
 [ -z '' -a ! -z x ]
@@ -117,8 +148,13 @@ command [ -z '' -a '(' ! -z x ')' ] && echo true
 #### == is alias for =
 [ a = a ] && echo true
 [ a == a ] && echo true
-## stdout-json: "true\ntrue\n"
-## BUG dash stdout-json: "true\n"
+## STDOUT: 
+true
+true
+## END
+## BUG dash STDOUT: 
+true
+## END
 ## BUG dash status: 2
 
 #### == and = does not do glob
@@ -126,8 +162,14 @@ command [ -z '' -a '(' ! -z x ')' ] && echo true
 echo status=$?
 [ abc == 'a*' ]
 echo status=$?
-## stdout-json: "status=1\nstatus=1\n"
-## N-I dash stdout-json: "status=1\nstatus=2\n"
+## STDOUT:
+status=1
+status=1
+## END
+## N-I dash STDOUT:
+status=1
+status=2
+## END
 
 #### [ with op variable
 # OK -- parsed AFTER evaluation of vars
@@ -135,7 +177,10 @@ op='='
 [ a $op a ] && echo true
 [ a $op b ] || echo false
 ## status: 0
-## stdout-json: "true\nfalse\n"
+## STDOUT:
+true
+false
+## END
 
 #### [ with unquoted empty var
 empty=''
@@ -147,7 +192,10 @@ empty=''
 var=-f
 [ $var = -f ] && echo true
 [ '-f' = $var ] && echo true
-## stdout-json: "true\ntrue\n"
+## STDOUT:
+true
+true
+## END
 
 #### [ '(' foo ] is runtime syntax error
 [ '(' foo ]
@@ -158,7 +206,11 @@ echo status=$?
 [ -z ] && echo true  # -z is operand
 [ -z '>' ] || echo false  # -z is operator
 [ -z '>' -- ] && echo true  # -z is operand
-## stdout-json: "true\nfalse\ntrue\n"
+## STDOUT:
+true
+false
+true
+## END
 
 #### operator/operand ambiguity with ]
 # bash parses this as '-z' AND ']', which is true.  It's a syntax error in
@@ -183,7 +235,10 @@ test -d $TMP
 echo status=$?
 test -d $TMP/__nonexistent_Z_Z__
 echo status=$?
-## stdout-json: "status=0\nstatus=1\n"
+## STDOUT:
+status=0
+status=1
+## END
 
 #### -x
 rm -f $TMP/x
@@ -192,7 +247,11 @@ test -x $TMP/x || echo 'no'
 chmod +x $TMP/x
 test -x $TMP/x && echo 'yes'
 test -x $TMP/__nonexistent__ || echo 'bad'
-## stdout-json: "no\nyes\nbad\n"
+## STDOUT:
+no
+yes
+bad
+## END
 
 #### -r
 echo '1' > $TMP/testr_yes
@@ -200,7 +259,10 @@ echo '2' > $TMP/testr_no
 chmod -r $TMP/testr_no  # remove read permission
 test -r $TMP/testr_yes && echo 'yes'
 test -r $TMP/testr_no || echo 'no'
-## stdout-json: "yes\nno\n"
+## STDOUT:
+yes
+no
+## END
 
 #### -w
 rm -f $TMP/testw_*
@@ -209,7 +271,24 @@ echo '2' > $TMP/testw_no
 chmod -w $TMP/testw_no  # remove write permission
 test -w $TMP/testw_yes && echo 'yes'
 test -w $TMP/testw_no || echo 'no'
-## stdout-json: "yes\nno\n"
+## STDOUT:
+yes
+no
+## END
+
+#### -k for sticky bit
+# not isolated: /tmp usually has sticky bit on
+# https://en.wikipedia.org/wiki/Sticky_bit
+
+test -k /tmp
+echo status=$?
+
+test -k /bin
+echo status=$?
+## STDOUT:
+status=0
+status=1
+## END
 
 #### -h and -L test for symlink
 tmp=$TMP/builtin-test-1
@@ -237,7 +316,7 @@ dangling is not file
 ## END
 
 #### -t 1 for stdout
-# There isn't way to get a terminal in the test environment?
+# There is no way to get a terminal in the test environment?
 [ -t 1 ]
 echo status=$?
 ## stdout: status=1
@@ -270,5 +349,183 @@ status=2
 ## END
 ## BUG mksh STDOUT:
 status=0
+## END
+
+#### test -s
+test -s __nonexistent
+echo status=$?
+touch $TMP/empty
+test -s $TMP/empty
+echo status=$?
+echo nonempty > $TMP/nonempty
+test -s $TMP/nonempty
+echo status=$?
+## STDOUT:
+status=1
+status=1
+status=0
+## END
+
+#### test -b -c -S (block, character, socket)
+# NOTE: we do not have the "true" case
+
+echo -b
+test -b nonexistent
+echo status=$?
+test -b testdata
+echo status=$?
+
+echo -c
+test -c nonexistent
+echo status=$?
+test -c testdata
+echo status=$?
+
+echo -S
+test -S nonexistent
+echo status=$?
+test -S testdata
+echo status=$?
+
+## STDOUT:
+-b
+status=1
+status=1
+-c
+status=1
+status=1
+-S
+status=1
+status=1
+## END
+
+
+#### test -p named pipe
+mkfifo $TMP/fifo
+test -p $TMP/fifo
+echo status=$?
+
+test -p testdata
+echo status=$?
+
+## STDOUT:
+status=0
+status=1
+## END
+
+#### -G and -O for effective user ID and group ID
+
+test -O bin
+echo status=$?
+test -O __nonexistent__
+echo status=$?
+
+test -G bin
+echo status=$?
+test -G __nonexistent__
+echo status=$?
+
+## STDOUT:
+status=0
+status=1
+status=0
+status=1
+## END
+
+#### -v to test variable
+test -v nonexistent
+echo global=$?
+
+g=1
+test -v g
+echo global=$?
+
+f() {
+  local f_var=0
+  g
+}
+
+g() {
+  test -v f_var
+  echo dynamic=$?
+  test -v g
+  echo dynamic=$?
+  test -v nonexistent
+  echo dynamic=$?
+}
+f
+
+## STDOUT:
+global=1
+global=0
+dynamic=0
+dynamic=0
+dynamic=1
+## END
+## N-I dash/mksh STDOUT:
+global=2
+global=2
+dynamic=2
+dynamic=2
+dynamic=2
+## END
+
+
+#### test -o for options
+# note: it's lame that the 'false' case is confused with the 'typo' case.
+# but checking for error code 2 is unlikely anyway.
+test -o nounset
+echo status=$?
+
+set -o nounset
+test -o nounset
+echo status=$?
+
+test -o _bad_name_
+echo status=$?
+## STDOUT:
+status=1
+status=0
+status=1
+## END
+## N-I dash STDOUT:
+status=2
+status=2
+status=2
+## END
+
+#### -nt -ot
+[ present -nt absent ] || exit 1
+[ absent -ot present ] || exit 2
+## status: 1
+
+#### -ef
+left=$TMP/left
+right=$TMP/right
+touch $left $right
+
+ln -f $TMP/left $TMP/hardlink
+
+test $left -ef $left && echo same
+test $left -ef $TMP/hardlink && echo same
+test $left -ef $right || echo different
+
+test $TMP/__nonexistent -ef $right || echo different
+
+## STDOUT:
+same
+same
+different
+different
+## END
+
+#### Overflow error
+test -t 12345678910
+echo status=$?
+## STDOUT:
+status=2
+## END
+## OK dash/bash STDOUT:
+status=1
 ## END
 

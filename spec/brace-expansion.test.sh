@@ -164,7 +164,7 @@ echo ~
 HOME=/home/bob
 echo {foo~,~}/bar
 ## stdout: foo~/bar /home/bob/bar
-## OK mksh stdout: foo~/bar ~/bar
+## OK osh/mksh stdout: foo~/bar ~/bar
 
 #### Two kinds of tilde expansion
 # NOTE: osh matches mksh.  Is that OK?
@@ -172,7 +172,7 @@ echo {foo~,~}/bar
 HOME=/home/bob
 echo ~{/src,root}
 ## stdout: /home/bob/src /root
-## OK mksh stdout: ~/src ~root
+## OK osh/mksh stdout: ~/src ~root
 
 #### Tilde expansion come before var expansion
 HOME=/home/bob
@@ -189,25 +189,98 @@ echo $foo
 
 #### Number range expansion
 echo -{1..8..3}-
-## stdout: -1- -4- -7-
-## N-I mksh stdout: -{1..8..3}-
+echo -{1..10..3}-
+## STDOUT:
+-1- -4- -7-
+-1- -4- -7- -10-
+## N-I mksh STDOUT:
+-{1..8..3}-
+-{1..10..3}-
+## END
 
-#### Ascending number range expansion with negative step
+#### Ascending number range expansion with negative step is invalid
 echo -{1..8..-3}-
-## stdout: -1- -4- -7-
-## OK zsh stdout: -7- -4- -1-
+## stdout-json: ""
+## status: 2
+## BUG bash stdout: -1- -4- -7-
+## BUG zsh stdout: -7- -4- -1-
+## BUG bash/zsh status: 0
 ## N-I mksh stdout: -{1..8..-3}-
+## N-I mksh status: 0
 
-#### Descending number range expansion
+#### regression: -1 step disallowed
+echo -{1..4..-1}-
+## stdout-json: ""
+## status: 2
+## BUG bash stdout: -1- -2- -3- -4-
+## BUG zsh stdout: -4- -3- -2- -1-
+## BUG bash/zsh status: 0
+## N-I mksh stdout: -{1..4..-1}-
+## N-I mksh status: 0
+
+#### regression: 0 step disallowed
+echo -{1..4..0}-
+## stdout-json: ""
+## status: 2
+## BUG bash stdout: -1- -2- -3- -4-
+## BUG zsh stdout: -1..4..0-
+## BUG bash/zsh status: 0
+## N-I mksh stdout: -{1..4..0}-
+## N-I mksh status: 0
+
+#### Descending number range expansion with positive step is invalid
 echo -{8..1..3}-
-## stdout: -8- -5- -2-
+## stdout-json: ""
+## status: 2
+## BUG bash/zsh stdout: -8- -5- -2-
+## BUG bash/zsh status: 0
 ## N-I mksh stdout: -{8..1..3}-
+## N-I mksh status: 0
 
 #### Descending number range expansion with negative step
 echo -{8..1..-3}-
 ## stdout: -8- -5- -2-
-## OK zsh stdout: -2- -5- -8-
+# zsh behavior seems clearly wrong!
+## BUG zsh stdout: -2- -5- -8-
 ## N-I mksh stdout: -{8..1..-3}-
+
+#### Singleton ranges
+echo {1..1}-
+echo {-9..-9}-
+echo {-9..-9..3}-
+echo {-9..-9..-3}-
+echo {a..a}-
+## STDOUT:
+1-
+-9-
+-9-
+-9-
+a-
+## END
+## N-I mksh STDOUT:
+{1..1}-
+{-9..-9}-
+{-9..-9..3}-
+{-9..-9..-3}-
+{a..a}-
+## END
+
+#### Singleton char ranges with steps
+echo {a..a..2}-
+echo {a..a..-2}-
+## STDOUT:
+a-
+a-
+## END
+# zsh is considered buggy because it implements {a..a} but not {a..a..1} !
+## BUG zsh STDOUT:
+{a..a..2}-
+{a..a..-2}-
+## END
+## N-I mksh STDOUT:
+{a..a..2}-
+{a..a..-2}-
+## END
 
 #### Char range expansion
 echo -{a..e}-
@@ -215,19 +288,62 @@ echo -{a..e}-
 ## N-I mksh stdout: -{a..e}-
 
 #### Char range expansion with step
-echo -{a..e..2}- -{a..e..-2}-
-## stdout: -a- -c- -e- -a- -c- -e-
-## N-I mksh/zsh stdout: -{a..e..2}- -{a..e..-2}-
+echo -{a..e..2}-
+## stdout: -a- -c- -e-
+## N-I mksh/zsh stdout: -{a..e..2}-
+
+#### Char ranges with steps of the wrong sign
+echo -{a..e..-2}-
+echo -{e..a..2}-
+## stdout-json: ""
+## status: 2
+## BUG bash STDOUT:
+-a- -c- -e-
+-e- -c- -a-
+## END
+## BUG bash status: 0
+## N-I mksh/zsh STDOUT:
+-{a..e..-2}-
+-{e..a..2}-
+## END
+## BUG mksh/zsh status: 0
+
+#### Mixed case char expansion is invalid
+case $SH in *zsh) echo BUG; exit ;; esac
+echo -{z..A}-
+echo -{z..A..2}-
+## stdout-json: ""
+## status: 2
+## OK mksh STDOUT:
+-{z..A}-
+-{z..A..2}-
+## END
+## OK mksh status: 0
+## BUG zsh stdout: BUG
+## BUG zsh status: 0
+# This is exposed a weird bash bug!!!
+## BUG bash stdout-json: ""
+## BUG bash status: 1
 
 #### Descending char range expansion
-echo -{e..a..2}- -{e..a..-2}-
-## stdout: -e- -c- -a- -e- -c- -a-
-## N-I mksh/zsh stdout: -{e..a..2}- -{e..a..-2}-
+echo -{e..a..-2}-
+## stdout: -e- -c- -a-
+## N-I mksh/zsh stdout: -{e..a..-2}-
 
 #### Fixed width number range expansion
 echo -{01..03}-
-## stdout: -01- -02- -03-
-## N-I mksh stdout: -{01..03}-
+echo -{09..12}-  # doesn't become -012-, fixed width
+echo -{12..07}-
+## STDOUT:
+-01- -02- -03-
+-09- -10- -11- -12-
+-12- -11- -10- -09- -08- -07-
+## END
+## N-I mksh STDOUT:
+-{01..03}-
+-{09..12}-
+-{12..07}-
+## END
 
 #### Inconsistent fixed width number range expansion
 # zsh uses the first one, bash uses the max width?
@@ -242,6 +358,57 @@ echo -{01..3}-
 ## stdout: -01- -02- -03-
 ## N-I mksh stdout: -{01..3}-
 
+#### Adjacent comma and range works
+echo -{a,b}{1..3}-
+## STDOUT:
+-a1- -a2- -a3- -b1- -b2- -b3-
+## END
+## N-I mksh STDOUT:
+-a{1..3}- -b{1..3}-
+## END
+
+#### Range inside comma works
+echo -{a,_{1..3}_,b}-
+## STDOUT:
+-a- -_1_- -_2_- -_3_- -b-
+## END
+## N-I mksh STDOUT:
+-a- -_{1..3}_- -b-
+## END
+
+#### Mixed comma and range doesn't work
+echo -{a,b,1..3}-
+## STDOUT:
+-a- -b- -1..3-
+## END
+
+#### comma and invalid range (adjacent and nested)
+echo -{a,b}{1...3}-
+echo -{a,{1...3}}-
+echo {a,b}{}
+## STDOUT:
+-a{1...3}- -b{1...3}-
+-a- -{1...3}-
+a{} b{}
+## END
+# osh doesn't expand ANYTHING on invalid syntax.  That's OK because of the test
+# case below.
+## OK osh STDOUT:
+-{a,b}{1...3}-
+-{a,{1...3}}-
+{a,b}{}
+## END
+
+#### OSH provides an alternative to invalid syntax
+echo -{a,b}\{1...3\}-
+echo -{a,\{1...3\}}-
+echo {a,b}\{\}
+## STDOUT:
+-a{1...3}- -b{1...3}-
+-a- -{1...3}-
+a{} b{}
+## END
+
 #### Side effect in expansion
 # bash is the only one that does it first.  I guess since this is
 # non-POSIX anyway, follow bash?
@@ -249,3 +416,27 @@ i=0
 echo {a,b,c}-$((i++))
 ## stdout: a-0 b-1 c-2
 ## OK mksh/zsh stdout: a-0 b-0 c-0
+
+#### Invalid brace expansions don't expand
+echo {1.3}
+echo {1...3}
+echo {1__3}
+## STDOUT:
+{1.3}
+{1...3}
+{1__3}
+## END
+
+#### Invalid brace expansions mixing characters and numbers
+# zsh does something crazy like : ; < = > that I'm not writing
+case $SH in *zsh) echo BUG; exit ;; esac
+echo {1..a}
+echo {z..3}
+## STDOUT:
+{1..a}
+{z..3}
+## END
+## BUG zsh STDOUT:
+BUG
+## END
+

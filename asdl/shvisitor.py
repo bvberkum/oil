@@ -1,8 +1,10 @@
 import re
 
 import osh
-from asdl import py_meta
+from . import pybase
 
+
+#class AsdlVisitor:
 
 class AstVisitor:
 
@@ -35,11 +37,11 @@ class AstVisitor:
             if not hasattr(node, key): continue
             v = getattr(node, key)
             if isinstance(v, list):
-                if v and isinstance(v[0], py_meta.CompoundObj):
+                if v and isinstance(v[0], pybase.CompoundObj):
                     for subnode in v:
                         self.visit(subnode)
             else:
-                if v and isinstance(v, py_meta.CompoundObj):
+                if v and isinstance(v, pybase.CompoundObj):
                     self.visit(v)
 
     def visititems(self, node, attr):
@@ -50,7 +52,8 @@ class AstVisitor:
     # mode doesn't need to; visit_ does any attribute pointing to an AST node
 
     #def visit_line_span(self, node): pass
-    def visit_token(self, node): pass
+    def visit_Token(self, node):
+        pass
     #def visit_braced_step(self, node): pass
     #def visit_bracket_op_e(self, node): pass
     #def visit_bracket_op(self, node): pass
@@ -90,7 +93,7 @@ class AstVisitor:
     #def visit_word(self, node): pass
     def visit_EmptyWord(self, node): pass
     #def visit_TokenWord(self, node): pass
-    def visit_CompoundWord(self, node): self.visititems(node, 'parts')
+    def visit_compound_word(self, node): self.visititems(node, 'parts')
     def visit_BracedWordTree(self, node): self.visititems(node, 'parts')
     #def visit_StringWord(self, node): pass
     #def visit_lhs_expr_e(self, node): pass
@@ -133,7 +136,7 @@ class AstVisitor:
     #def visit_command_e(self, node): pass
     #def visit_command(self, node): pass
     #def visit_NoOp(self, node): pass
-    def visit_SimpleCommand(self, node): self.visititems(node, 'words')
+    def visit_command__Simple(self, node): self.visititems(node, 'words')
     def visit_Sentence(self, node):
         self.visit(node.child)
         self.visit(node.terminator)
@@ -232,16 +235,16 @@ class CmdNameVisitor(AstVisitor):
         if ignores:
             self.builtins.extend(ignores)
 
-    def print_cmdname_SimpleCommand(self, node):
+    def print_cmdname_command__Simple(self, node):
         """
         Look at first word, if literal token compare to cmd name lists.
         """
         words = node.words[:]
-        if words[0].__class__.__name__ in ( 'CompoundWord', ):
-            execname = self.getexec_SimpleCommand_CompoundWord(words[0])
+        if words[0].__class__.__name__ in ( 'compound_word', ):
+            execname = self.getexec_compound(words[0])
             while execname in self.prefixes:
                 words.pop(0)
-                execname = self.getexec_SimpleCommand_CompoundWord(words[0])
+                execname = self.getexec_compound(words[0])
             if not execname or execname in self.builtins:
                 return
             if execname.startswith('$'):
@@ -256,42 +259,20 @@ class CmdNameVisitor(AstVisitor):
         else:
             assert False, node
 
-    def getexec_SimpleCommand_CompoundWord(self, node):
-        nc = node.parts[0].__class__.__name__
+    def getexec(self, node):
+        if hasattr(node, 'parts'):
+            return self.getexec_compound(node)
 
-        if nc in (
-            'LiteralPart',
-            'SimpleVarSub',
-            'BracedVarSub'
-        ):
-            if len(node.parts) > 1:
-                # NOTE: ignore multi bits, just visit single command words
-                return
-            name = node.parts[0].token.val
-            if nc == 'BracedVarSub':
-                name = '$'+name
-            return name
-
-        elif nc in (
-            'CommandSubPart',
-        ):
-            if node.parts[0].command_list.children[0].__class__.__name__ in ('SimpleCommand',):
-                pass # self.print_SimpleCommand(node.parts[0].command_list.children[0])
-            assert False, node
-
-        elif nc in (
-            'DoubleQuotedPart',
-        ):
-            name = node.parts[0].parts[0].token.val
-            if node.parts[0].parts[0].token.id == osh.meta.Id.Lit_Chars:
-                print(name, '$')
-                return '$'+name
-            return name
-
-        elif nc in (
-            'TildeSubPart',
-        ):
-            return ''.join(map(lambda n: n.token.val, node.parts))
-
+        nc = node.__class__.__name__
+        if nc in ( 'Token', ):
+            return node.val
+        elif nc in ( 'braced_var_sub', ):
+            return "$%s" % node.token.val
         else:
-            assert False, node
+            if hasattr(node, 'token'):
+                return node.token.val
+
+            assert False, (nc, node)
+
+    def getexec_compound(self, node):
+        return ''.join(map(self.getexec, node.parts))

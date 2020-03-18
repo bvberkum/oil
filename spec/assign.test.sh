@@ -2,10 +2,10 @@
 
 #### Env value doesn't persist
 FOO=foo printenv.py FOO
-echo [$FOO]
+echo -$FOO-
 ## STDOUT:
 foo
-[]
+--
 ## END
 
 #### Env value with equals
@@ -38,11 +38,11 @@ FOO=foo\<foo printenv.py FOO
 FOO=foo echo "[$foo]"
 ## stdout: []
 
-#### FOO=foo func
-func() {
+#### FOO=foo fun
+fun() {
   echo "[$FOO]"
 }
-FOO=foo func
+FOO=foo fun
 ## stdout: [foo]
 
 #### Multiple temporary envs on the stack
@@ -120,12 +120,13 @@ foo\=bar
 # mksh gives acceptable error of 1.
 FOO=bar for i in a b; do printenv.py $FOO; done
 ## BUG dash status: 0
-## OK  mksh status: 1
+## OK  mksh/zsh status: 1
 ## status: 2
 
 #### Trying to run keyword 'for'
 FOO=bar for
 ## status: 127
+## OK zsh status: 1
 
 #### Empty env binding
 EMPTY= printenv.py EMPTY
@@ -143,313 +144,62 @@ a=_tmp/*.Z
 argv.py "$a"
 ## stdout: ['_tmp/*.Z']
 
-#### Env binding in readonly/declare disallowed
-# I'm disallowing this in the oil shell, because it doesn't work in bash!
-# (v=None vs v=foo)
-# assert status 2 for parse error, but allow stdout v=None/status 0 for
-# existing implementations.
+#### Env binding in readonly/declare is NOT exported!  (pitfall)
+
+# All shells agree on this, but it's very confusing behavior.
 FOO=foo readonly v=$(printenv.py FOO)
 echo "v=$v"
-## OK bash/dash/mksh stdout: v=None
-## OK bash/dash/mksh status: 0
-## status: 2
 
-#### local -a
-# nixpkgs setup.sh uses this (issue #26)
-f() {
-  local -a array=(x y z)
-  argv.py "${array[@]}"
-}
-f
-## stdout: ['x', 'y', 'z']
-## N-I dash stdout-json: ""
-## N-I dash status: 2
-## N-I mksh stdout-json: ""
-## N-I mksh status: 1
+# bash has probems here:
+FOO=foo readonly v2=$FOO
+echo "v2=$v2"
 
-#### declare -a
-# nixpkgs setup.sh uses this (issue #26)
-declare -a array=(x y z)
-argv.py "${array[@]}"
-## stdout: ['x', 'y', 'z']
-## N-I dash stdout-json: ""
-## N-I dash status: 2
-## N-I mksh stdout-json: ""
-## N-I mksh status: 1
-
-#### typeset -a a[1]=a a[3]=c
-# declare works the same way in bash, but not mksh.
-# spaces are NOT allowed here.
-typeset -a a[1*1]=x a[1+2]=z
-argv.py "${a[@]}"
-## stdout: ['x', 'z']
-## N-I dash stdout-json: ""
-## N-I dash status: 2
-
-#### indexed LHS without spaces is allowed
-a[1 * 1]=x a[ 1 + 2 ]=z
-argv.py "${a[@]}"
-## stdout: ['x', 'z']
-## N-I dash stdout-json: ""
-## N-I dash status: 2
-
-#### declare -f exit code indicates function existence
-func2=x  # var names are NOT found
-declare -f myfunc func2
-echo $?
-
-myfunc() { echo myfunc; }
-# This prints the source code.
-declare -f myfunc func2 > /dev/null
-echo $?
-
-func2() { echo func2; }
-declare -f myfunc func2 > /dev/null
-echo $?
 ## STDOUT:
-1
-1
-0
+v=None
+v2=foo
 ## END
-## N-I dash/mksh STDOUT:
-127
-127
-127
+## BUG bash STDOUT:
+v=None
+v2=
 ## END
-
-#### declare -F prints function names
-add () { expr 4 + 4; }
-div () { expr 6 / 2; }
-ek () { echo hello; }
-__ec () { echo hi; }
-_ab () { expr 10 % 3; }
-
-declare -F
-## STDOUT:
-declare -f __ec
-declare -f _ab
-declare -f add
-declare -f div
-declare -f ek
-## END
-## N-I dash/mksh stdout-json: ""
-## N-I dash/mksh status: 127
-
-#### declare -p 
-var1() { echo func; }  # function names are NOT found.
-declare -p var1 var2 >/dev/null
-echo $?
-
-var1=x
-declare -p var1 var2 >/dev/null
-echo $?
-
-var2=y
-declare -p var1 var2 >/dev/null
-echo $?
-## STDOUT:
-1
-1
-0
-## N-I dash/mksh STDOUT:
-127
-127
-127
-## END
-
-#### typeset -f 
-# mksh implement typeset but not declare
-typeset  -f myfunc func2
-echo $?
-
-myfunc() { echo myfunc; }
-# This prints the source code.
-typeset  -f myfunc func2 > /dev/null
-echo $?
-
-func2() { echo func2; }
-typeset  -f myfunc func2 > /dev/null
-echo $?
-## STDOUT:
-1
-1
-0
-## END
-## N-I dash STDOUT:
-127
-127
-127
-## END
-
-#### typeset -p 
-var1() { echo func; }  # function names are NOT found.
-typeset -p var1 var2 >/dev/null
-echo $?
-
-var1=x
-typeset -p var1 var2 >/dev/null
-echo $?
-
-var2=y
-typeset -p var1 var2 >/dev/null
-echo $?
-## STDOUT:
-1
-1
-0
-## BUG mksh STDOUT:
-# mksh doesn't respect exit codes
-0
-0
-0
-## END
-## N-I dash STDOUT:
-127
-127
-127
-## END
-
-#### typeset -r makes a string readonly
-typeset -r s1='12'
-typeset -r s2='34'
-
-s1='c'
-echo status=$?
-s2='d'
-echo status=$?
-
-s1+='e'
-echo status=$?
-s2+='f'
-echo status=$?
-
-unset s1
-echo status=$?
-unset s2
-echo status=$?
-
-## status: 1
-## stdout-json: ""
-## OK mksh status: 2
-## OK bash status: 0
-## OK bash STDOUT:
-status=1
-status=1
-status=1
-status=1
-status=1
-status=1
-## END
-## OK dash status: 0
-## N-I dash STDOUT:
-status=0
-status=0
-status=127
-status=127
-status=0
-status=0
-## END
-
-#### typeset -ar makes it readonly
-typeset -a -r array1=(1 2)
-typeset -ar array2=(3 4)
-
-array1=('c')
-echo status=$?
-array2=('d')
-echo status=$?
-
-array1+=('e')
-echo status=$?
-array2+=('f')
-echo status=$?
-
-unset array1
-echo status=$?
-unset array2
-echo status=$?
-
-## status: 1
-## stdout-json: ""
-## OK bash status: 0
-## OK bash STDOUT:
-status=1
-status=1
-status=1
-status=1
-status=1
-status=1
-## END
-## N-I dash status: 2
-## N-I dash stdout-json: ""
-## N-I mksh status: 1
-## N-I mksh stdout-json: ""
-
-#### typeset -x makes it exported
-typeset -rx PYTHONPATH=lib/
-printenv.py PYTHONPATH
-## STDOUT:
-lib/
-## END
-## N-I dash stdout: None
-
-#### Multiple assignments / array assignments on a line
-a=1 b[0+0]=2 c=3
-echo $a $b $c
-## stdout: 1 2 3
-## N-I dash stdout:
 
 #### assignments / array assignments not interpreted after 'echo'
 a=1 echo b[0]=2 c=3
 ## stdout: b[0]=2 c=3
+# zsh interprets [0] as some kind of glob
+## OK zsh stdout-json: ""
+## OK zsh status: 1
 
-#### Env bindings shouldn't contain array assignments
-a=1 b[0]=2 c=3 printenv.py a b c
-## status: 2
-## stdout-json: ""
-## OK bash STDOUT:
-1
-None
-3
-## END
-## OK bash status: 0
-## BUG mksh STDOUT:
-1
-2
-3
-## END
-## OK mksh status: 0
-## N-I dash stdout-json: ""
-## N-I dash status: 127
-
-#### syntax error in array assignment
-a=x b[0+]=y c=z
-echo $a $b $c
-## status: 2
-## stdout-json: ""
-## BUG bash stdout: x
-## BUG bash status: 0
-## OK mksh stdout-json: ""
-## OK mksh status: 1
-## N-I dash stdout:
-## N-I dash status: 0
-
-#### dynamic local variables
+#### dynamic local variables (and splitting)
 f() {
   local "$1"  # Only x is assigned here
-  echo [$x]
-  echo [$a]
+  echo x=\'$x\'
+  echo a=\'$a\'
 
   local $1  # x and a are assigned here
-  echo [$x]
-  echo [$a]
+  echo x=\'$x\'
+  echo a=\'$a\'
 }
 f 'x=y a=b'
+## OK dash/bash/mksh STDOUT:
+x='y a=b'
+a=''
+x='y'
+a='b'
+## END
+# osh and zsh don't do word splitting
 ## STDOUT:
-[y a=b]
-[]
-[y]
-[b]
+x='y a=b'
+a=''
+x='y a=b'
+a=''
+## END
+
+#### readonly x= gives empty string (regression)
+readonly x=
+argv.py "$x"
+## STDOUT:
+['']
 ## END
 
 #### 'local x' does not set variable
@@ -461,6 +211,7 @@ f() {
 f
 ## status: 1
 ## OK dash status: 2
+## BUG zsh status: 0
 
 #### 'local -a x' does not set variable
 set -o nounset
@@ -471,6 +222,7 @@ f() {
 f
 ## status: 1
 ## OK dash status: 2
+## BUG zsh status: 0
 
 #### 'local x' and then array assignment
 f() {
@@ -483,9 +235,9 @@ f
 ## stdout: foo
 ## N-I dash status: 2
 ## N-I dash stdout-json: ""
+## BUG zsh stdout: o
 
 #### 'declare -A' and then dict assignment
-set -o strict-arith
 declare -A foo
 key=bar
 foo["$key"]=value
@@ -496,41 +248,6 @@ echo ${foo["bar"]}
 ## N-I dash stdout-json: ""
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
-
-#### declare -g (bash-specific; bash-completion uses it)
-f() {
-  declare -g G=42
-  declare L=99
-
-  declare -Ag dict
-  dict["foo"]=bar
-
-  declare -A localdict
-  localdict["spam"]=Eggs
-
-  # For bash-completion
-  eval 'declare -Ag ev'
-  ev["ev1"]=ev2
-}
-f
-argv.py "$G" "$L"
-argv.py "${dict["foo"]}" "${localdict["spam"]}"
-argv.py "${ev["ev1"]}"
-## STDOUT:
-['42', '']
-['bar', '']
-['ev2']
-## END
-## N-I dash STDOUT:
-['', '']
-
-## END
-## N-I dash status: 2
-## N-I mksh STDOUT:
-['', '']
-
-## END
-## N-I mksh status: 1
 
 #### declare in an if statement
 # bug caught by my feature detection snippet in bash-completion
@@ -546,4 +263,382 @@ echo $spam
 bar
 eggs
 ## END
+
+
+#### Modify a temporary binding
+# (regression for bug found by Michael Greenberg)
+f() {
+  echo "x before = $x"
+  x=$((x+1))
+  echo "x after  = $x"
+}
+x=5 f
+## STDOUT:
+x before = 5
+x after  = 6
+## END
+
+#### Reveal existence of "temp frame" (All shells disagree here!!!)
+f() {
+  echo "x=$x"
+
+  x=mutated-temp  # mutate temp frame
+  echo "x=$x"
+
+  # Declare a new local
+  local x='local'
+  echo "x=$x"
+
+  # Unset it
+  unset x
+  echo "x=$x"
+}
+
+x=global
+x=temp-binding f
+echo "x=$x"
+
+## STDOUT:
+x=temp-binding
+x=mutated-temp
+x=local
+x=
+x=global
+## END
+## BUG dash STDOUT:
+x=temp-binding
+x=mutated-temp
+x=local
+x=
+x=mutated-temp
+## END
+## BUG bash STDOUT:
+x=temp-binding
+x=mutated-temp
+x=local
+x=global
+x=global
+## END
+## BUG mksh STDOUT:
+x=temp-binding
+x=mutated-temp
+x=local
+x=mutated-temp
+x=mutated-temp
+## END
+## BUG yash STDOUT:
+# yash has no locals
+x=temp-binding
+x=mutated-temp
+x=mutated-temp
+x=
+x=
+## END
+
+#### Test above without 'local' (which is not POSIX)
+f() {
+  echo "x=$x"
+
+  x=mutated-temp  # mutate temp frame
+  echo "x=$x"
+
+  # Unset it
+  unset x
+  echo "x=$x"
+}
+
+x=global
+x=temp-binding f
+echo "x=$x"
+
+## STDOUT:
+x=temp-binding
+x=mutated-temp
+x=
+x=global
+## END
+## BUG dash/mksh/yash STDOUT:
+x=temp-binding
+x=mutated-temp
+x=
+x=
+## END
+## BUG bash STDOUT:
+x=temp-binding
+x=mutated-temp
+x=global
+x=global
+## END
+
+#### Using ${x-default} after unsetting local shadowing a global
+f() {
+  echo "x=$x"
+  local x='local'
+  echo "x=$x"
+  unset x
+  echo "- operator = ${x-default}"
+  echo ":- operator = ${x:-default}"
+}
+x=global
+f
+## STDOUT:
+x=global
+x=local
+- operator = default
+:- operator = default
+## END
+## BUG mksh STDOUT:
+x=global
+x=local
+- operator = global
+:- operator = global
+## END
+
+#### Using ${x-default} after unsetting a temp binding shadowing a global
+f() {
+  echo "x=$x"
+  local x='local'
+  echo "x=$x"
+  unset x
+  echo "- operator = ${x-default}"
+  echo ":- operator = ${x:-default}"
+}
+x=global
+x=temp-binding f
+## STDOUT:
+x=temp-binding
+x=local
+- operator = default
+:- operator = default
+## END
+## BUG mksh STDOUT:
+x=temp-binding
+x=local
+- operator = temp-binding
+:- operator = temp-binding
+## END
+## BUG bash STDOUT:
+x=temp-binding
+x=local
+- operator = global
+:- operator = global
+## END
+
+#### static assignment doesn't split
+words='a b c'
+export ex=$words
+glo=$words
+readonly ro=$words
+argv.py "$ex" "$glo" "$ro"
+
+## STDOUT:
+['a b c', 'a b c', 'a b c']
+## END
+## BUG dash STDOUT:
+['a', 'a b c', 'a']
+## END
+
+
+#### aliased assignment doesn't split
+shopt -s expand_aliases || true
+words='a b c'
+alias e=export
+alias r=readonly
+e ex=$words
+r ro=$words
+argv.py "$ex" "$ro"
+## BUG dash STDOUT:
+['a', 'a']
+## END
+## STDOUT:
+['a b c', 'a b c']
+## END
+
+
+#### assignment using dynamic keyword (splits in most shells, not in zsh/osh)
+words='a b c'
+e=export
+r=readonly
+$e ex=$words
+$r ro=$words
+argv.py "$ex" "$ro"
+
+# zsh and OSH are smart
+## STDOUT:
+['a b c', 'a b c']
+## END
+
+## OK dash/bash/mksh STDOUT:
+['a', 'a']
+## END
+
+
+#### assignment using dynamic var names doesn't split
+words='a b c'
+arg_ex=ex=$words
+arg_ro=ro=$words
+
+# no quotes, this is split of course
+export $arg_ex
+readonly $arg_ro
+
+argv.py "$ex" "$ro"
+
+arg_ex2=ex2=$words
+arg_ro2=ro2=$words
+
+# quotes, no splitting
+export "$arg_ex2"
+readonly "$arg_ro2"
+
+argv.py "$ex2" "$ro2"
+
+## STDOUT:
+['a b c', 'a b c']
+['a b c', 'a b c']
+## END
+## OK dash/bash/mksh STDOUT:
+['a', 'a']
+['a b c', 'a b c']
+## END
+
+#### assign and glob
+cd $TMP
+touch foo=a foo=b
+foo=*
+argv.py "$foo"
+unset foo
+
+export foo=*
+argv.py "$foo"
+unset foo
+
+## STDOUT:
+['*']
+['*']
+## END
+## BUG dash STDOUT:
+['*']
+['b']
+## END
+
+#### declare and glob
+cd $TMP
+touch foo=a foo=b
+typeset foo=*
+argv.py "$foo"
+unset foo
+## STDOUT:
+['*']
+## END
+## N-I dash STDOUT:
+['']
+## END
+
+#### readonly $x where x='b c'
+one=a
+two='b c'
+readonly $two $one
+a=new
+echo status=$?
+b=new
+echo status=$?
+c=new
+echo status=$?
+
+# in OSH and zsh, this is an invalid variable name
+## status: 1
+## stdout-json: ""
+
+# most shells make two variable read-only
+
+## OK dash/mksh status: 2
+## OK bash status: 0
+## OK bash STDOUT:
+status=1
+status=1
+status=1
+## END
+
+#### readonly a=(1 2) no_value c=(3 4) makes 'no_value' readonly
+readonly a=(1 2) no_value c=(3 4)
+no_value=x
+## status: 1
+## stdout-json: ""
+## OK dash status: 2
+
+#### export a=1 no_value c=2
+no_value=foo
+export a=1 no_value c=2
+printenv.py no_value
+## STDOUT:
+foo
+## END
+
+#### local a=loc $var c=loc
+var='b'
+b=global
+echo $b
+f() {
+  local a=loc $var c=loc
+  argv.py "$a" "$b" "$c"
+}
+f
+## STDOUT:
+global
+['loc', '', 'loc']
+## END
+## BUG dash STDOUT:
+global
+['loc', 'global', 'loc']
+## END
+
+#### redirect after assignment builtin (what's going on with dash/bash/mksh here?)
+readonly x=$(stdout_stderr.py) 2>/dev/null
+echo done
+## STDOUT:
+done
+## END
+## STDERR:
+STDERR
+## END
+## BUG zsh stderr-json: ""
+
+#### redirect after command sub (like case above but without assignment builtin)
+echo stdout=$(stdout_stderr.py) 2>/dev/null
+## STDOUT:
+stdout=STDOUT
+## END
+## STDERR:
+STDERR
+## END
+
+#### redirect after bare assignment
+x=$(stdout_stderr.py) 2>/dev/null
+echo done
+## STDOUT:
+done
+## END
+## stderr-json: ""
+## BUG bash STDERR:
+STDERR
+## END
+
+#### redirect after declare -p
+case $SH in *dash) exit 99 ;; esac  # stderr unpredictable
+
+foo=bar
+typeset -p foo 1>&2
+## STDERR:
+typeset foo=bar
+## END
+## OK bash STDERR:
+declare -- foo="bar"
+## END
+## OK osh STDERR:
+foo
+## END
+## N-I dash status: 99
+## N-I dash stderr-json: ""
+## stdout-json: ""
 

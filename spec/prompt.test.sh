@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-#
-# For testing the Python sketch
 
 #### sh -i
-echo 'echo foo' | PS1='$ ' $SH --norc -i
+# This fails because OSH prompt goes to stdout, and other differences. It's
+# probably OK to be honest.
+echo 'echo foo' | PS1='$ ' $SH --rcfile /dev/null -i
 ## STDOUT:
 foo
 ## END
@@ -12,7 +12,7 @@ $ echo foo
 $ exit
 ## END
 
-#### [] are non-printing
+#### \[\] are non-printing
 PS1='\[foo\]\$'
 echo "${PS1@P}"
 ## STDOUT:
@@ -134,10 +134,18 @@ $
 ## END
 
 #### hostname
+
+# NOTE: This test is not hermetic.  On my machine the short and long host name
+# are the same.
+
 PS1='\h '
+test "${PS1@P}" = "$(hostname -s) "  # short name
+echo status=$?
+PS1='\H '
 test "${PS1@P}" = "$(hostname) "
 echo status=$?
 ## STDOUT:
+status=0
 status=0
 ## END
 
@@ -153,6 +161,14 @@ status=0
 #### current working dir
 PS1='\w '
 test "${PS1@P}" = "${PWD} "
+echo status=$?
+## STDOUT:
+status=0
+## END
+
+#### \W is basename of working dir
+PS1='\W '
+test "${PS1@P}" = "$(basename $PWD) "
 echo status=$?
 ## STDOUT:
 status=0
