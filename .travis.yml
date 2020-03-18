@@ -11,20 +11,20 @@
 
 # Every job uses this deploy step.
 _publish_html: &publish_html
-  deploy:
-    # https://docs.travis-ci.com/user/deployment#uploading-files-and-skip_cleanup
-    # otherwise we can't zip up _tmp/toil, etc.
-    - provider: script
-      skip_cleanup: true
-      script: services/travis.sh publish-html
-      on:
-        branch: master
-    # duplicate block for testing on dev/andy-21
-    - provider: script
-      skip_cleanup: true
-      script: services/travis.sh publish-html
-      on:
-        branch: dev/andy-21
+  deploy: [] # Cannot deploy outside oilshell.org infra
+#    # https://docs.travis-ci.com/user/deployment#uploading-files-and-skip_cleanup
+#    # otherwise we can't zip up _tmp/toil, etc.
+#    - provider: script
+#      skip_cleanup: true
+#      script: services/travis.sh publish-html
+#      on:
+#        branch: master
+#    # duplicate block for testing on dev/andy-21
+#    - provider: script
+#      skip_cleanup: true
+#      script: services/travis.sh publish-html
+#      on:
+#        branch: dev/andy-21
 
 jobs:
   include:
