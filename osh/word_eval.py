@@ -7,7 +7,7 @@ from _devbuild.gen.syntax_asdl import (
     braced_var_sub, Token,
     word, word_e, word_t, compound_word,
     bracket_op_e, bracket_op__ArrayIndex, bracket_op__WholeArray,
-    suffix_op_e, suffix_op__Nullary, suffix_op__PatSub, suffix_op__Slice,
+    suffix_op_e, suffix_op__PatSub, suffix_op__Slice,
     suffix_op__Unary,
     sh_array_literal, single_quoted, double_quoted, simple_var_sub,
     command_sub,
@@ -16,19 +16,21 @@ from _devbuild.gen.syntax_asdl import (
     word_part__FuncCall, word_part__Splice, word_part__TildeSub,
 )
 from _devbuild.gen.runtime_asdl import (
-    effect_e,
     part_value, part_value_e, part_value_t, part_value__String,
     part_value__Array,
     value, value_e, value_t, value__Str, value__AssocArray,
     value__MaybeStrArray, value__Obj,
-    lvalue, assign_arg, 
+    lvalue, lvalue_t,
+    assign_arg, 
     cmd_value_e, cmd_value_t, cmd_value, cmd_value__Assign, cmd_value__Argv,
     quote_e, quote_t,
+    a_index, a_index_e, a_index_t, a_index__Int, a_index__Str,
+    scope_e,
 )
 from core import error
 from core import passwd
 from core import pyutil
-from core import state
+from qsn_ import qsn
 from core.util import log, e_die, e_strict
 from frontend import consts
 from frontend import match
@@ -44,14 +46,11 @@ from typing import Optional, Tuple, List, Dict, cast, TYPE_CHECKING
 
 if TYPE_CHECKING:
   from _devbuild.gen.id_kind_asdl import Id_t
-  from _devbuild.gen.syntax_asdl import (
-    command_t, speck, word_part_t
-  )
-  from _devbuild.gen.runtime_asdl import effect_t, lvalue__Named
+  from _devbuild.gen.syntax_asdl import command_t, speck, word_part_t
   from _devbuild.gen.option_asdl import builtin_t
-  from core.ui import ErrorFormatter
+  from core import executor
   from core import optview
-  from osh import cmd_exec
+  from core.ui import ErrorFormatter
   from osh.split import SplitContext
   from core.state import Mem
   from osh import prompt
@@ -61,7 +60,7 @@ if TYPE_CHECKING:
 
 # For compatibility, ${BASH_SOURCE} and ${BASH_SOURCE[@]} are both valid.
 # ${FUNCNAME} and ${BASH_LINENO} are also the same type of of special variables.
-_STRING_AND_ARRAY = ('BASH_SOURCE', 'FUNCNAME', 'BASH_LINENO')
+_STRING_AND_ARRAY = ['BASH_SOURCE', 'FUNCNAME', 'BASH_LINENO']
 
 
 def EvalSingleQuoted(part):
@@ -245,25 +244,29 @@ def _PerformSlice(val,  # type: value_t
         e_die("The length index of a array slice can't be negative: %d",
               length, part=part)
 
-      strs = []  # type: List[str]
-
       # Quirk: "begin" for positional arguments ($@ and $*) counts $0.
       if arg0_val is not None:
-        # Equivalent to:
-        # val.strs = [arg0_val.s] + val.strs
-        # but more efficient.
-        if begin == 0:
-          if not has_length or length > 0:
-            strs.append(arg0_val.s)
-        elif begin > 0:
-          begin -= 1
+        orig = [arg0_val.s]
+        orig.extend(val.strs)
+      else:
+        orig = val.strs
 
-      # NOTE: Unset elements don't count towards the length.
-      for s in val.strs[begin:]:
-        if s is not None:
+      n = len(orig)
+      if begin < 0:
+        i = n + begin  # ${@:-3} starts counts from the end
+      else:
+        i = begin
+      strs = []  # type: List[str]
+      count = 0
+      while i < n:
+        s = orig[i]
+        if s is not None:  # Unset elements don't count towards the length.
           strs.append(s)
-          if has_length and len(strs) == length:
+          count += 1
+          if has_length and count == length:
             break
+        i += 1
+       
       val = value.MaybeStrArray(strs)
 
     elif case(value_e.AssocArray):
@@ -417,11 +420,14 @@ class AbstractWordEvaluator(StringWordEvaluator):
                    op,  # type: suffix_op__Unary
                    quoted,  # type: bool
                    part_vals,  # type: Optional[List[part_value_t]]
+                   var_name,  # type: str
+                   var_index,  # type: a_index_t
+                   blame_token,  # type: Token
                    ):
-    # type: (...) -> Tuple[List[part_value_t], effect_t]
+    # type: (...) -> bool
     """
     Returns:
-      effect_part_vals, effect_e
+      Whether part_vals was mutated
 
       ${a:-} returns part_value[]
       ${a:+} returns part_value[]
@@ -440,47 +446,45 @@ class AbstractWordEvaluator(StringWordEvaluator):
 
       echo ${a:-x"$@"x}
     """
-    undefined = (val.tag_() == value_e.Undef)
-
-    no = None  # type: List[part_value_t]
+    # NOTE: Splicing part_values is necessary because of code like
+    # ${undef:-'a b' c 'd # e'}.  Each part_value can have a different
+    # do_glob/do_elide setting.
 
     # TODO: Change this to a bitwise test?
-    if op.op_id in (
-        Id.VTest_ColonHyphen, Id.VTest_ColonEquals, Id.VTest_ColonQMark,
-        Id.VTest_ColonPlus):
+    if op.op_id in (Id.VTest_ColonHyphen, Id.VTest_ColonEquals,
+                    Id.VTest_ColonQMark, Id.VTest_ColonPlus):
       UP_val = val
       with tagswitch(val) as case:
         if case(value_e.Undef):
           is_falsey = True
         elif case(value_e.Str):
           val = cast(value__Str, UP_val)
-          is_falsey = not val.s
+          is_falsey = len(val.s) == 0
         elif case(value_e.MaybeStrArray):
           val = cast(value__MaybeStrArray, UP_val)
-          is_falsey = not val.strs
+          is_falsey = len(val.strs) == 0
         else:
           raise NotImplementedError(val.tag_())
     else:
-      is_falsey = undefined
+      is_falsey = val.tag_() == value_e.Undef
 
     #print('!!',id, is_falsey)
     if op.op_id in (Id.VTest_ColonHyphen, Id.VTest_Hyphen):
       if is_falsey:
-        assert op.arg_word
         self._EvalWordToParts(op.arg_word, quoted, part_vals, is_subst=True)
-        return no, effect_e.SpliceParts
+        return True
       else:
-        return no, effect_e.NoOp
+        return False
 
+    # Inverse of the above.
     elif op.op_id in (Id.VTest_ColonPlus, Id.VTest_Plus):
-      # Inverse of the above.
       if is_falsey:
-        return no, effect_e.NoOp
+        return False
       else:
-        assert op.arg_word
         self._EvalWordToParts(op.arg_word, quoted, part_vals, is_subst=True)
-        return no, effect_e.SpliceParts
+        return True
 
+    # Splice and assign
     elif op.op_id in (Id.VTest_ColonEquals, Id.VTest_Equals):
       if is_falsey:
         # Collect new part vals.
@@ -490,9 +494,34 @@ class AbstractWordEvaluator(StringWordEvaluator):
 
         # Append them to out param AND return them.
         part_vals.extend(assign_part_vals)
-        return assign_part_vals, effect_e.SpliceAndAssign
+
+        if var_name is None:
+          # TODO: error context
+          e_die("Can't assign to special variable")
+        else:
+          # NOTE: This decays arrays too!  'set -o strict_array' could
+          # avoid it.
+          rhs_str = _DecayPartValuesToString(assign_part_vals,
+                                             self.splitter.GetJoinChar())
+          if var_index is None:  # using None when no index
+            lval = lvalue.Named(var_name)  # type: lvalue_t
+          else:
+            UP_var_index = var_index
+            with tagswitch(var_index) as case:
+              if case(a_index_e.Int):
+                var_index = cast(a_index__Int, UP_var_index)
+                lval = lvalue.Indexed(var_name, var_index.i)
+              elif case(a_index_e.Str):
+                var_index = cast(a_index__Str, UP_var_index)
+                lval = lvalue.Keyed(var_name, var_index.s)
+              else: 
+                raise AssertionError()
+
+          self.mem.SetVar(lval, value.Str(rhs_str), scope_e.Dynamic)
+        return True
+
       else:
-        return no, effect_e.NoOp
+        return False
 
     elif op.op_id in (Id.VTest_ColonQMark, Id.VTest_QMark):
       if is_falsey:
@@ -500,9 +529,12 @@ class AbstractWordEvaluator(StringWordEvaluator):
         error_part_vals = []  # type: List[part_value_t]
         self._EvalWordToParts(op.arg_word, quoted, error_part_vals,
                               is_subst=True)
-        return error_part_vals, effect_e.Error
+        error_str = _DecayPartValuesToString(error_part_vals,
+                                             self.splitter.GetJoinChar())
+        e_die("unset variable %r", error_str, token=blame_token)
+
       else:
-        return no, effect_e.NoOp
+        return False
 
     else:
       raise NotImplementedError(op.op_id)
@@ -814,20 +846,37 @@ class AbstractWordEvaluator(StringWordEvaluator):
 
     maybe_decay_array = False  # for $*, ${a[*]}, etc.
     bash_array_compat = False  # for ${BASH_SOURCE}
+    name_query = False
 
     var_name = None  # type: str  # For ${foo=default}
 
     # 1. Evaluate from (var_name, var_num, token Id) -> value
     if part.token.id == Id.VSub_Name:
-      var_name = part.token.val
-      # TODO: LINENO can use its own span_id!
-      val = self.mem.GetVar(var_name)
+      # Handle ${!prefix@} first, since that looks at names and not values
+      if (part.prefix_op is not None and 
+          part.suffix_op is not None and
+          part.suffix_op.tag_() == suffix_op_e.Nullary):
+
+        names = self.mem.VarNamesStartingWith(part.token.val)
+        names.sort()
+        val = value.MaybeStrArray(names)  # type: value_t
+
+        suffix_op = cast(Token, part.suffix_op)
+        # "${!prefix@}" is the only one that doesn't decay
+        maybe_decay_array = not (quoted and suffix_op.id == Id.VOp3_At)
+        name_query = True
+      else:
+        var_name = part.token.val
+        # TODO: LINENO can use its own span_id!
+        val = self.mem.GetVar(var_name)
     elif part.token.id == Id.VSub_Number:
       var_num = int(part.token.val)
       val = self._EvalVarNum(var_num)
     else:
       # $* decays
       val, maybe_decay_array = self._EvalSpecialVar(part.token.id, quoted)
+
+    var_index = None  # type: a_index_t
 
     # 2. Bracket: value -> (value v, bool maybe_decay_array)
     # maybe_decay_array is for joining ${a[*]} and unquoted ${a[@]} AFTER
@@ -891,6 +940,7 @@ class AbstractWordEvaluator(StringWordEvaluator):
             elif case2(value_e.MaybeStrArray):
               array_val = cast(value__MaybeStrArray, UP_val)
               index = self.arith_ev.EvalToInt(anode)
+              var_index = a_index.Int(index)
               try:
                 # could be None because representation is sparse
                 s = array_val.strs[index]
@@ -905,6 +955,7 @@ class AbstractWordEvaluator(StringWordEvaluator):
             elif case2(value_e.AssocArray):
               assoc_val = cast(value__AssocArray, UP_val)
               key = self.arith_ev.EvalWordToString(anode)
+              var_index = a_index.Str(key)
               s = assoc_val.d.get(key)
 
               if s is None:
@@ -921,92 +972,86 @@ class AbstractWordEvaluator(StringWordEvaluator):
     else:  # no bracket op
       # When the array is "$@", var_name is None
       if var_name and val.tag_() in (value_e.MaybeStrArray, value_e.AssocArray):
-        if var_name in _STRING_AND_ARRAY:
+        suffix_op2 = part.suffix_op
+        if (suffix_op2 and suffix_op2.tag_() == suffix_op_e.Nullary and 
+            cast(Token, suffix_op2).id == Id.VOp0_a):
+          # ${array@a} is a string
+          # TODO: An IR for ${} might simplify these lengthy conditions
+          pass
+        elif var_name in _STRING_AND_ARRAY:
           bash_array_compat = True
         else:
           e_die("Array %r can't be referred to as a scalar (without @ or *)",
                 var_name, part=part)
 
-    suffix_processed = False
-    if part.prefix_op:
+    if part.prefix_op and not name_query:
       val = self._EmptyStrOrError(val)  # maybe error
+      # could be
+      # - ${!ref-default}
+      # - "${!assoc[@]}" vs. ${!assoc[*]} (TODO: maybe_decay_array for this
+      #   case)
+      val = self._ApplyPrefixOp(val, part.prefix_op, part.token)
 
-      # ${!prefix@} has both prefix and suffix ops
-      if part.suffix_op and part.suffix_op.tag_() == suffix_op_e.Nullary:
-        assert part.prefix_op.id == Id.VSub_Bang
-        names = self.mem.VarNamesStartingWith(part.token.val)
-        names.sort()
-        val = value.MaybeStrArray(names)
+      # NOTE: The length operator followed by a suffix operator is a SYNTAX
+      # error.
 
-        suffix_op = cast(suffix_op__Nullary, part.suffix_op)
-        # "${!prefix@}" is the only one that doesn't decay
-        maybe_decay_array = not (quoted and suffix_op.op_id == Id.VOp3_At)
-
-        suffix_processed = True
-      else:
-        # could be
-        # - ${!ref-default}
-        # - "${!assoc[@]}" vs. ${!assoc[*]} (TODO: maybe_decay_array for this
-        #   case)
-        val = self._ApplyPrefixOp(val, part.prefix_op, part.token)
-
-        # NOTE: The length operator followed by a suffix operator is a SYNTAX
-        # error.
-
-    if part.suffix_op and not suffix_processed:
+    if part.suffix_op and not name_query:
       op = part.suffix_op
       UP_op = op
       with tagswitch(op) as case:
         if case(suffix_op_e.Nullary):
-          op = cast(suffix_op__Nullary, UP_op)
-          if op.op_id == Id.VOp0_P:
+          op = cast(Token, UP_op)
+          op_id = op.id
+          if op_id == Id.VOp0_P:
             prompt = self.prompt_ev.EvalPrompt(val)
             # readline gets rid of these, so we should too.
             p = prompt.replace('\x01', '').replace('\x02', '')
             val = value.Str(p)
-          elif op.op_id == Id.VOp0_Q:
+
+          elif op_id == Id.VOp0_Q:
             assert val.tag_() == value_e.Str, val
             val = cast(value__Str, val)
-            val = value.Str(string_ops.ShellQuote(val.s))
+            val = value.Str(qsn.maybe_shell_encode(val.s))
+            # oddly, 'echo ${x@Q}' is equivalent to 'echo "${x@Q}"' in bash
+            quoted = True
+
+          elif op_id == Id.VOp0_a:
+            # We're ONLY simluating -a and -A, not -r -x -n for now.  See
+            # spec/ble-idioms.test.sh.
+            chars = []  # type: List[str]
+            with tagswitch(val) as case:
+              if case(value_e.MaybeStrArray):
+                chars.append('a')
+              elif case(value_e.AssocArray):
+                chars.append('A')
+
+            if var_name is not None:  # e.g. ${?@a} is allowed
+              cell = self.mem.GetCell(var_name)
+              if cell.readonly:
+                chars.append('r')
+              if cell.exported:
+                chars.append('x')
+              if cell.nameref:
+                chars.append('n')
+
+            val = value.Str(''.join(chars))
+
           else:
-            raise NotImplementedError(op.op_id)
+            e_die('Var op %r not implemented', op.val, token=op)
 
         elif case(suffix_op_e.Unary):
           op = cast(suffix_op__Unary, UP_op)
           if consts.GetKind(op.op_id) == Kind.VTest:
-            # TODO: Change style to:
-            # if self._ApplyTestOp(...)
-            #   return
-            # It should return whether anything was done.  If not, we continue to
-            # the end, where we might throw an error.
+            # TODO: Also we need bracket_op to form lvalue here?
+            # So pass 'part'?
+            # bracket_op_e.ArrayIndex
+            # you already evaluated 'key' and 'index' above, so I guess
+            # you need index_t?
 
-            effect_part_vals, effect = self._ApplyTestOp(val, op, quoted, part_vals)
-
-            # NOTE: Splicing part_values is necessary because of code like
-            # ${undef:-'a b' c 'd # e'}.  Each part_value can have a different
-            # do_glob/do_elide setting.
-            if effect == effect_e.SpliceParts:
-              return  # EARLY RETURN, part_vals mutated
-
-            elif effect == effect_e.SpliceAndAssign:
-              if var_name is None:
-                # TODO: error context
-                e_die("Can't assign to special variable")
-              else:
-                # NOTE: This decays arrays too!  'set -o strict_array' could
-                # avoid it.
-                rhs_str = _DecayPartValuesToString(effect_part_vals,
-                                                   self.splitter.GetJoinChar())
-                state.SetStringDynamic(self.mem, var_name, rhs_str)
-              return  # EARLY RETURN, part_vals mutated
-
-            elif effect == effect_e.Error:
-              error_str = _DecayPartValuesToString(effect_part_vals,
-                                                   self.splitter.GetJoinChar())
-              e_die("unset variable %r", error_str, token=part.token)
-
-            else:
-              pass  # do nothing, may still be undefined
+            if self._ApplyTestOp(val, op, quoted, part_vals, var_name, var_index, part.token):
+              # e.g. to evaluate ${undef:-'default'}, we already appended
+              # what we need
+              return
 
           else:
             val = self._EmptyStrOrError(val)  # maybe error
@@ -1079,7 +1124,7 @@ class AbstractWordEvaluator(StringWordEvaluator):
             length = self.arith_ev.EvalToInt(op.length)
 
           try:
-            arg0_val = None
+            arg0_val = None  # type: value__Str
             if var_name is None: # $* or $@
               arg0_val = self.mem.GetArg0()
             val = _PerformSlice(val, begin, length, has_length, part, arg0_val)
@@ -1250,10 +1295,10 @@ class AbstractWordEvaluator(StringWordEvaluator):
         part = cast(command_sub, UP_part)
         id_ = part.left_token.id
         if id_ in (Id.Left_DollarParen, Id.Left_Backtick):
-          sv = self._EvalCommandSub(part.command_list, quoted) # type: part_value_t
+          sv = self._EvalCommandSub(part.child, quoted) # type: part_value_t
 
         elif id_ in (Id.Left_ProcSubIn, Id.Left_ProcSubOut):
-          sv = self._EvalProcessSub(part.command_list, id_)
+          sv = self._EvalProcessSub(part.child, id_)
 
         else:
           raise AssertionError(id_)
@@ -1604,9 +1649,10 @@ class AbstractWordEvaluator(StringWordEvaluator):
     # There is also command -p, but we haven't implemented it.  Maybe just punt
     # on it.  Punted on 'builtin' and 'command' for now too.
 
+    eval_to_pairs = True  # except for -f and -F
     started_pairs = False
 
-    flags = [arg0]
+    flags = [arg0]  # initial flags like -p, and -f -F name1 name2
     flag_spids = [word_.LeftMostSpanForWord(words[0])]
     assign_args = []  # type: List[assign_arg]
 
@@ -1628,7 +1674,7 @@ class AbstractWordEvaluator(StringWordEvaluator):
           if tok_val[-2] == '+':
             e_die('+= not allowed in assignment builtin', word=w)
 
-          left = lvalue.Named(tok_val[:-1])
+          var_name = tok_val[:-1]
           if part_offset == len(w.parts):
             rhs_word = word.Empty()  # type: word_t
           else:
@@ -1639,7 +1685,7 @@ class AbstractWordEvaluator(StringWordEvaluator):
               rhs_word = tmp
 
           right = self.EvalRhsWord(rhs_word)
-          arg2 = assign_arg(left, right, word_spid)
+          arg2 = assign_arg(var_name, right, word_spid)
           assign_args.append(arg2)
 
         else:  # e.g. export $dynamic
@@ -1655,11 +1701,20 @@ class AbstractWordEvaluator(StringWordEvaluator):
           if arg.startswith('-') or arg.startswith('+'):  # e.g. declare -r +r
             flags.append(arg)
             flag_spids.append(word_spid)
+
+            # Shortcut that relies on -f and -F always meaning "function" for
+            # all assignment builtins
+            if 'f' in arg or 'F' in arg:
+              eval_to_pairs = False
+
           else:  # e.g. export $dynamic 
-            left, right = _SplitAssignArg(arg, w)
-            arg2 = assign_arg(left, right, word_spid)
-            assign_args.append(arg2)
-            started_pairs = True
+            if eval_to_pairs:
+              left, right = _SplitAssignArg(arg, w)
+              arg2 = assign_arg(left, right, word_spid)
+              assign_args.append(arg2)
+              started_pairs = True
+            else:
+              flags.append(arg)
 
     return cmd_value.Assign(builtin_id, flags, flag_spids, assign_args)
 
@@ -1820,15 +1875,15 @@ class AbstractWordEvaluator(StringWordEvaluator):
 
 
 def _SplitAssignArg(arg, w):
-  # type: (str, compound_word) -> Tuple[lvalue__Named, Optional[value__Str]]
+  # type: (str, compound_word) -> Tuple[str, Optional[value__Str]]
   i = arg.find('=')
   prefix = arg[:i]
   if i != -1 and match.IsValidVarName(prefix):
-    return lvalue.Named(prefix), value.Str(arg[i+1:])
+    return prefix, value.Str(arg[i+1:])
   else:
     if match.IsValidVarName(arg):  # local foo   # foo becomes undefined
       no_str = None  # type: Optional[value__Str]
-      return lvalue.Named(arg), no_str
+      return arg, no_str
     else:
       e_die("Invalid variable name %r", arg, word=w)
 
@@ -1838,23 +1893,23 @@ class NormalWordEvaluator(AbstractWordEvaluator):
   def __init__(self, mem, exec_opts, splitter, errfmt):
     # type: (Mem, optview.Exec, SplitContext, ErrorFormatter) -> None
     AbstractWordEvaluator.__init__(self, mem, exec_opts, splitter, errfmt)
-    self.ex = None  # type: cmd_exec.Executor
+    self.shell_ex = None  # type: executor.ShellExecutor
 
   def CheckCircularDeps(self):
     # type: () -> None
     assert self.arith_ev is not None
     assert self.expr_ev is not None
-    assert self.ex is not None
+    assert self.shell_ex is not None
     assert self.prompt_ev is not None
 
   def _EvalCommandSub(self, node, quoted):
     # type: (command_t, bool) -> part_value__String
-    stdout = self.ex.RunCommandSub(node)
+    stdout = self.shell_ex.RunCommandSub(node)
     return part_value.String(stdout, quoted, not quoted)
 
   def _EvalProcessSub(self, node, id_):
     # type: (command_t, Id_t) -> part_value__String
-    dev_path = self.ex.RunProcessSub(node, id_)
+    dev_path = self.shell_ex.RunProcessSub(node, id_)
     # pretend it's quoted; no split or glob
     return part_value.String(dev_path, True, False)
 

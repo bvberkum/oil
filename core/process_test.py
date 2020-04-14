@@ -8,7 +8,10 @@ import unittest
 
 from _devbuild.gen.id_kind_asdl import Id
 from _devbuild.gen.option_asdl import option_i
-from _devbuild.gen.runtime_asdl import redirect, cmd_value
+from _devbuild.gen.runtime_asdl import (
+    redirect, redirect_arg, cmd_value
+)
+from _devbuild.gen.syntax_asdl import redir_loc
 from core import optview
 from core import process  # module under test
 from core import test_lib
@@ -17,6 +20,7 @@ from core import util
 from core.util import log
 from core import state
 from osh import builtin_misc
+from asdl import runtime
 
 Process = process.Process
 ExternalThunk = process.ExternalThunk
@@ -31,7 +35,7 @@ def Banner(msg):
 _ARENA = test_lib.MakeArena('process_test.py')
 
 _MEM = state.Mem('', [], _ARENA, [])
-state.InitMem(_MEM, {})
+state.InitMem(_MEM, {}, '0.1')
 
 _OPT_ARRAY = [False] * option_i.ARRAY_SIZE
 _PARSE_OPTS = optview.Parse(_OPT_ARRAY)
@@ -41,8 +45,7 @@ _JOB_STATE = process.JobState()
 _WAITER = process.Waiter(_JOB_STATE, _EXEC_OPTS)
 _ERRFMT = ui.ErrorFormatter(_ARENA)
 _FD_STATE = process.FdState(_ERRFMT, _JOB_STATE)
-_SEARCH_PATH = state.SearchPath(_MEM)
-_EXT_PROG = process.ExternalProgram(False, _FD_STATE, _SEARCH_PATH, _ERRFMT,
+_EXT_PROG = process.ExternalProgram(False, _FD_STATE, _ERRFMT,
                                     util.NullDebugFile())
 
 
@@ -77,18 +80,20 @@ class ProcessTest(unittest.TestCase):
 
     # Should get the first line twice, because Pop() closes it!
 
-    r = redirect.Path(Id.Redir_Less, 0, PATH)
+    r = redirect(Id.Redir_Less, runtime.NO_SPID, redir_loc.Fd(0),
+                 redirect_arg.Path(PATH))
+
     fd_state.Push([r], waiter)
-    line1 = builtin_misc.ReadLineFromStdin()
+    line1, _ = builtin_misc.ReadLineFromStdin('\n')
     fd_state.Pop()
 
     fd_state.Push([r], waiter)
-    line2 = builtin_misc.ReadLineFromStdin()
+    line2, _ = builtin_misc.ReadLineFromStdin('\n')
     fd_state.Pop()
 
     # sys.stdin.readline() would erroneously return 'two' because of buffering.
-    self.assertEqual('one\n', line1)
-    self.assertEqual('one\n', line2)
+    self.assertEqual('one', line1)
+    self.assertEqual('one', line2)
 
   def testProcess(self):
 
@@ -111,7 +116,7 @@ class ProcessTest(unittest.TestCase):
 
   def testPipeline(self):
     node = _CommandNode('uniq -c', _ARENA)
-    ex = test_lib.InitExecutor(arena=_ARENA, ext_prog=_EXT_PROG)
+    cmd_ev = test_lib.InitCommandEvaluator(arena=_ARENA, ext_prog=_EXT_PROG)
     print('BEFORE', os.listdir('/dev/fd'))
 
     p = process.Pipeline()
@@ -119,7 +124,7 @@ class ProcessTest(unittest.TestCase):
     p.Add(_ExtProc(['cut', '-d', '.', '-f', '2']))
     p.Add(_ExtProc(['sort']))
 
-    p.AddLast((ex, node))
+    p.AddLast((cmd_ev, node))
 
     pipe_status = p.Run(_WAITER, _FD_STATE)
     log('pipe_status: %s', pipe_status)
@@ -127,7 +132,7 @@ class ProcessTest(unittest.TestCase):
     print('AFTER', os.listdir('/dev/fd'))
 
   def testPipeline2(self):
-    ex = test_lib.InitExecutor(arena=_ARENA, ext_prog=_EXT_PROG)
+    cmd_ev = test_lib.InitCommandEvaluator(arena=_ARENA, ext_prog=_EXT_PROG)
 
     Banner('ls | cut -d . -f 1 | head')
     p = process.Pipeline()
@@ -135,7 +140,7 @@ class ProcessTest(unittest.TestCase):
     p.Add(_ExtProc(['cut', '-d', '.', '-f', '1']))
 
     node = _CommandNode('head', _ARENA)
-    p.AddLast((ex, node))
+    p.AddLast((cmd_ev, node))
 
     fd_state = process.FdState(_ERRFMT, _JOB_STATE)
     print(p.Run(_WAITER, _FD_STATE))
@@ -146,11 +151,11 @@ class ProcessTest(unittest.TestCase):
     node3 = _CommandNode('sort --reverse', _ARENA)
 
     p = process.Pipeline()
-    p.Add(Process(process.SubProgramThunk(ex, node1), _JOB_STATE))
-    p.Add(Process(process.SubProgramThunk(ex, node2), _JOB_STATE))
-    p.Add(Process(process.SubProgramThunk(ex, node3), _JOB_STATE))
+    p.Add(Process(process.SubProgramThunk(cmd_ev, node1), _JOB_STATE))
+    p.Add(Process(process.SubProgramThunk(cmd_ev, node2), _JOB_STATE))
+    p.Add(Process(process.SubProgramThunk(cmd_ev, node3), _JOB_STATE))
 
-    last_thunk = (ex, _CommandNode('cat', _ARENA))
+    last_thunk = (cmd_ev, _CommandNode('cat', _ARENA))
     p.AddLast(last_thunk)
 
     print(p.Run(_WAITER, _FD_STATE))

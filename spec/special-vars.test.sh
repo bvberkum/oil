@@ -327,3 +327,97 @@ echo $b1 $b2
 2 2
 ## END
 
+
+#### $_
+: 1
+echo $_
+: 'foo'"bar"
+echo $_
+## STDOUT:
+1
+foobar
+## END
+## N-I dash/mksh stdout-json: "\n\n"
+
+#### $_ with assignments, arrays, etc.
+case $SH in (dash|mksh) exit ;; esac
+
+: foo
+echo $_
+
+s=bar
+echo s:$_
+
+# zsh uses declare; bash uses s=bar
+declare s=bar
+echo s:$_
+
+# zsh remains s:declare, bash resets it
+a=(1 2)
+echo a:$_
+
+# zsh sets it to declare, bash uses the LHS a
+declare a=(1 2)
+echo a:$_
+
+declare -g a=(1 2)
+echo flag:$_
+
+## STDOUT:
+foo
+s:
+s:s=bar
+a:
+a:a
+flag:a
+## END
+## OK zsh STDOUT:
+foo
+s:
+s:declare
+a:s:declare
+a:declare
+flag:-g
+## END
+## N-I dash/mksh stdout-json: ""
+
+#### $_ undefined
+set -e
+
+# seems to be set to $0 at first, interesting.
+x=$($SH -u -c 'echo $_')
+test -n "$x"
+echo nonempty=$?
+## STDOUT:
+nonempty=0
+## END
+## OK zsh status: 1
+## OK zsh stdout-json: ""
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+
+#### BASH_VERSION / OIL_VERSION
+case $SH in
+  (bash)
+    # BASH_VERSION=zz
+
+    echo $BASH_VERSION | egrep -o '4\.4\.0' > /dev/null
+    echo matched=$?
+    ;;
+  (*osh)
+    # note: version string is mutable like in bash.  I guess that's useful for
+    # testing?  We might want a strict mode to eliminate that?
+
+    echo $OIL_VERSION | egrep -o '[0-9]\.[0-9]\.' > /dev/null
+    echo matched=$?
+    ;;
+  (*)
+    echo 'no version'
+    ;;
+esac
+## STDOUT:
+matched=0
+## END
+## N-I dash/mksh/zsh STDOUT:
+no version
+## END

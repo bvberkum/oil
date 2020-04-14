@@ -1646,7 +1646,8 @@ class Generate(ExpressionVisitor[T], StatementVisitor[None]):
         func_name = o.name()
         ret_type = o.type.ret_type
 
-        if (class_name in ('BoolParser', 'CommandParser') and func_name == '_Next' or
+        if (class_name in ('BoolParser', 'CommandParser') and
+              func_name == '_Next' or
             class_name == 'ParseContext' and func_name == 'MakeOshParser' or
             class_name == 'ErrorFormatter' and func_name == 'PrettyPrintError' or
             class_name is None and func_name == 'PrettyPrintError' or
@@ -1657,16 +1658,18 @@ class Generate(ExpressionVisitor[T], StatementVisitor[None]):
             # virtual method in several classes
             func_name == 'EvalWordToString' or
             class_name == 'ArithEvaluator' and func_name == '_ValToIntOrError' or
-            class_name is None and func_name == '_StringToInteger' or
-            class_name == 'BoolEvaluator' and func_name in ('_EvalCompoundWord', '_StringToIntegerOrError') or
-            class_name == 'Executor' and func_name == '_Execute' or
+            class_name == 'BoolEvaluator' and
+              func_name in ('_EvalCompoundWord', '_StringToIntegerOrError') or
+            class_name == 'CommandEvaluator' and func_name == '_Execute' or
             class_name is None and func_name == '_PackFlags' or
-            class_name == 'Mem' and func_name in ('GetVar', 'SetVar') or
+            class_name == 'Mem' and func_name in ('GetVar', 'SetVar', 'GetCell') or
             class_name == 'SearchPath' and func_name == 'Lookup' or
             # osh/sh_expr_eval.py
             class_name is None and func_name == 'EvalLhsAndLookup' or
             class_name == 'SplitContext' and
-              func_name in ('SplitForWordEval', '_GetSplitter')
+              func_name in ('SplitForWordEval', '_GetSplitter') or
+            class_name is None and 
+              func_name in ('maybe_encode', 'maybe_shell_encode')
           ):
 
           default_val = o.arguments[-1].initializer
@@ -1996,7 +1999,7 @@ class Generate(ExpressionVisitor[T], StatementVisitor[None]):
                 'source', 'source_e',
                 'suffix_op', 'suffix_op_e',
 
-                'sh_lhs_expr', 'redir', 'parse_result',
+                'sh_lhs_expr', 'parse_result',
 
                 'command_e', 'command', 
                 'arith_expr_e', 'arith_expr',
@@ -2005,7 +2008,8 @@ class Generate(ExpressionVisitor[T], StatementVisitor[None]):
                 'place_expr_e', 'place_expr', 
                 'word_part_e', 'word_part', 
                 'word_e', 'word',
-                'redir_e', 'redir',
+                'redir_loc_e', 'redir_loc',
+                'redir_param_e', 'redir_param',
                 'proc_sig_e', 'proc_sig',
 
                 'glob_part_e', 'glob_part',
@@ -2020,7 +2024,8 @@ class Generate(ExpressionVisitor[T], StatementVisitor[None]):
                 'value_e', 'value',
                 'part_value_e', 'part_value',
                 'cmd_value_e', 'cmd_value',
-                'redirect_e', 'redirect',
+                'redirect_arg_e', 'redirect_arg',
+                'a_index_e', 'a_index',
                 ):
                 is_namespace = True
 
@@ -2039,7 +2044,7 @@ class Generate(ExpressionVisitor[T], StatementVisitor[None]):
                 self.write_ind('using %s::%s;\n', last_dotted, name)
           else:
             # If we're importing a module without an alias, we don't need to do
-            # anything.  'namespace cmd_exec' is already defined.
+            # anything.  'namespace cmd_eval' is already defined.
             if not alias:
               return
 

@@ -68,6 +68,12 @@ _BACKSLASH = [
   C('\\\n', Id.Ignored_LineCont),
 ]
 
+# Only 4 characters are backslash escaped inside "".
+# https://www.gnu.org/software/bash/manual/bash.html#Double-Quotes
+_DQ_BACKSLASH = [
+  R(r'\\[$`"\\]', Id.Lit_EscapedChar)
+]
+
 VAR_NAME_RE = r'[a-zA-Z_][a-zA-Z0-9_]*'
 
 # All Kind.VSub
@@ -130,7 +136,9 @@ LEXER_DEF[lex_mode_e.Comment] = [
 # syntax error.  It's defined negatively, but let's define positive runs here.
 # TODO: Add + and @ here they are never special?  It's different for Oil
 # though.
-_LITERAL_WHITELIST_REGEX = r'[a-zA-Z0-9_/.-]+'
+
+# The range \x80-\xff makes sure that UTF-8 sequences are a single token.
+_LITERAL_WHITELIST_REGEX = r'[\x80-\xffa-zA-Z0-9_/.\-]+'
 
 _UNQUOTED = _BACKSLASH + _LEFT_SUBS + _LEFT_UNQUOTED + _VARS + [
   # NOTE: We could add anything 128 and above to this character class?  So
@@ -259,6 +267,11 @@ def IsKeyword(name):
   # type: (str) -> bool
   return name in OSH_KEYWORD_NAMES
 
+FD_VAR_NAME = r'\{' + VAR_NAME_RE + r'\}'
+
+# file descriptors can only have two digits, like mksh
+# dash/zsh/etc. can have one
+FD_NUM = r'[0-9]?[0-9]?'
 
 # These two can must be recognized in the Outer state, but can't nested within
 # [[.
@@ -292,16 +305,27 @@ LEXER_DEF[lex_mode_e.ShCommand] = [
   # @array and @func(1, c)
   R('@' + VAR_NAME_RE, Id.Lit_Splice),  # for Oil splicing
 
-  R(r'[0-9]*<', Id.Redir_Less),
-  R(r'[0-9]*>', Id.Redir_Great),
-  R(r'[0-9]*<<', Id.Redir_DLess),
-  R(r'[0-9]*<<<', Id.Redir_TLess),
-  R(r'[0-9]*>>', Id.Redir_DGreat),
-  R(r'[0-9]*<<-', Id.Redir_DLessDash),
-  R(r'[0-9]*>&', Id.Redir_GreatAnd),
-  R(r'[0-9]*<&', Id.Redir_LessAnd),
-  R(r'[0-9]*<>', Id.Redir_LessGreat),
-  R(r'[0-9]*>\|', Id.Redir_Clobber),
+  R(FD_NUM + r'<', Id.Redir_Less),
+  R(FD_NUM + r'>', Id.Redir_Great),
+  R(FD_NUM + r'<<', Id.Redir_DLess),
+  R(FD_NUM + r'<<<', Id.Redir_TLess),
+  R(FD_NUM + r'>>', Id.Redir_DGreat),
+  R(FD_NUM + r'<<-', Id.Redir_DLessDash),
+  R(FD_NUM + r'>&', Id.Redir_GreatAnd),
+  R(FD_NUM + r'<&', Id.Redir_LessAnd),
+  R(FD_NUM + r'<>', Id.Redir_LessGreat),
+  R(FD_NUM + r'>\|', Id.Redir_Clobber),
+
+  R(FD_VAR_NAME + r'<', Id.Redir_Less),
+  R(FD_VAR_NAME + r'>', Id.Redir_Great),
+  R(FD_VAR_NAME + r'<<', Id.Redir_DLess),
+  R(FD_VAR_NAME + r'<<<', Id.Redir_TLess),
+  R(FD_VAR_NAME + r'>>', Id.Redir_DGreat),
+  R(FD_VAR_NAME + r'<<-', Id.Redir_DLessDash),
+  R(FD_VAR_NAME + r'>&', Id.Redir_GreatAnd),
+  R(FD_VAR_NAME + r'<&', Id.Redir_LessAnd),
+  R(FD_VAR_NAME + r'<>', Id.Redir_LessGreat),
+  R(FD_VAR_NAME + r'>\|', Id.Redir_Clobber),
 
   # No leading descriptor (2 is implied)
   C(r'&>', Id.Redir_AndGreat),
@@ -382,10 +406,7 @@ LEXER_DEF[lex_mode_e.BashRegex] = _LEFT_SUBS + _LEFT_UNQUOTED + _VARS + [
   R(r'[^\0]', Id.Lit_Other),  # everything else is literal
 ]
 
-LEXER_DEF[lex_mode_e.DQ] = [
-  # Only 4 characters are backslash escaped inside "".
-  # https://www.gnu.org/software/bash/manual/bash.html#Double-Quotes
-  R(r'\\[$`"\\]', Id.Lit_EscapedChar),
+LEXER_DEF[lex_mode_e.DQ] = _DQ_BACKSLASH + [
   C('\\\n', Id.Ignored_LineCont),
 ] + _LEFT_SUBS + _VARS + [
   R(r'[^$`"\0\\]+', Id.Lit_Chars),  # matches a line at most
@@ -394,7 +415,7 @@ LEXER_DEF[lex_mode_e.DQ] = [
   R(r'[^\0]', Id.Lit_Other),  # e.g. "$"
 ]
 
-_VS_ARG_COMMON = _BACKSLASH + [
+_VS_ARG_COMMON = [
   C('/', Id.Lit_Slash),  # for patsub (not Id.VOp2_Slash)
   C('#', Id.Lit_Pound),  # for patsub prefix (not Id.VOp1_Pound)
   C('%', Id.Lit_Percent),  # for patsdub suffix (not Id.VOp1_Percent)
@@ -403,14 +424,16 @@ _VS_ARG_COMMON = _BACKSLASH + [
 
 # Kind.{LIT,IGNORED,VS,LEFT,RIGHT,Eof}
 LEXER_DEF[lex_mode_e.VSub_ArgUnquoted] = \
-  _VS_ARG_COMMON + _LEFT_SUBS + _LEFT_UNQUOTED + _VARS + [
+  _BACKSLASH + _VS_ARG_COMMON + _LEFT_SUBS + _LEFT_UNQUOTED + _VARS + [
   # NOTE: added < and > so it doesn't eat <()
   R(r'[^$`/}"\'\0\\#%<>]+', Id.Lit_Chars),
   R(r'[^\0]', Id.Lit_Other),  # e.g. "$", must be last
 ]
 
 # Kind.{LIT,IGNORED,VS,LEFT,RIGHT,Eof}
-LEXER_DEF[lex_mode_e.VSub_ArgDQ] = _VS_ARG_COMMON + _LEFT_SUBS + _VARS + [
+LEXER_DEF[lex_mode_e.VSub_ArgDQ] = \
+  _DQ_BACKSLASH +  _VS_ARG_COMMON + _LEFT_SUBS + _VARS + [
+
   R(r'[^$`/}"\0\\#%]+', Id.Lit_Chars),  # matches a line at most
 
   # Weird wart: even in double quoted state, double quotes are allowed
@@ -530,13 +553,16 @@ LEXER_DEF[lex_mode_e.PrintfOuter] = _C_STRING_COMMON + [
 # Maybe: bash also supports %(strftime)T
 LEXER_DEF[lex_mode_e.PrintfPercent] = [
   # Flags
-  R('[-0 +#]', Id.Format_Flag),
+  R('[- +#]', Id.Format_Flag),
+  C('0', Id.Format_Zero),
 
   R('[1-9][0-9]*', Id.Format_Num),
+  C('*', Id.Format_Star),
   C('.', Id.Format_Dot),
   # We support dsq.  The others we parse to display an error message.
   R('[disqbcouxXeEfFgG]', Id.Format_Type),
-  R(r'[^\0]', Id.Unknown_Tok),  # any otehr char
+  R('\([^()]*\)T', Id.Format_Time),
+  R(r'[^\0]', Id.Unknown_Tok),  # any other char
 ]
 
 LEXER_DEF[lex_mode_e.VSub_1] = [
@@ -607,7 +633,7 @@ GLOB_DEF = [
   C('*', Id.Glob_Star),
   C('?', Id.Glob_QMark),
 
-  # For negation.
+  # For negation.  Treated as operators inside [], but literals outside.
   C('!', Id.Glob_Bang),
   C('^', Id.Glob_Caret),
 
@@ -680,6 +706,25 @@ BRACE_RANGE_DEF = [
   R(r'[a-zA-Z]', Id.Range_Char),  # just a single character
   R(r'\.\.', Id.Range_Dots),
   R(r'[^\0]', Id.Range_Other),  # invalid
+]
+
+# Note: this would be an optimization.  NUL handling might be a problem
+# because the ('\0', Id.Eol_Tok) rule is automatically inserted.
+QSN_DEF = [
+  # Optimized so they appear together
+  R(_LITERAL_WHITELIST_REGEX, Id.QSN_LiteralBytes),
+
+  # includes \r \n \t \0
+  R(r'[\x00-\x1F\'"\\]', Id.QSN_SpecialByte),
+
+  # UTF-8 sequences
+  R(r'[\xc0-\xdf]', Id.QSN_Begin2),
+  R(r'[\xe0-\xef]', Id.QSN_Begin3),
+  R(r'[\xf0-\xf7]', Id.QSN_Begin4),
+
+  R(r'[\x80-\xbf]', Id.QSN_Cont),
+
+  R(r'[^\0]', Id.QSN_LiteralBytes),
 ]
 
 

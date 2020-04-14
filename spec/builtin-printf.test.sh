@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-#
 # printf
 # bash-completion uses this odd printf -v construction.  It seems to mostly use
 # %s and %q though.
@@ -17,7 +15,7 @@
 #### printf with no args
 printf
 ## status: 2
-## OK dash/mksh/zsh status: 1
+## OK mksh/zsh status: 1
 ## stdout-json: ""
 
 #### printf -v %s
@@ -96,6 +94,9 @@ echo "$foo"
 ## STDOUT:
 '"quoted" with spaces and \'
 ## END
+## OK osh STDOUT:
+$'"quoted" with spaces and \\'
+## END
 ## N-I dash/ash stdout-json: ""
 ## N-I dash/ash status: 2
 ## N-I mksh stdout-json: "\n"
@@ -134,7 +135,7 @@ mylocal=
 dollar=dollar
 --
 dollar='$'
-mylocal='mylocal'
+mylocal=mylocal
 --
 dollar='$'
 mylocal=
@@ -218,6 +219,34 @@ printf '[%0.0s]\n' foo
 ## END
 ## N-I mksh stdout-json: "[      ]\n["
 ## N-I mksh status: 1
+
+#### printf %6.s and %0.s
+printf '[%6.s]\n' foo
+printf '[%0.s]\n' foo
+## STDOUT:
+[      ]
+[]
+## END
+## BUG zsh STDOUT:
+[   foo]
+[foo]
+## END
+## N-I mksh stdout-json: "[      ]\n["
+## N-I mksh status: 1
+
+#### printf %*.*s (width/precision from args)
+printf '[%*s]\n' 9 hello
+printf '[%.*s]\n' 3 hello
+printf '[%*.3s]\n' 9 hello
+printf '[%9.*s]\n' 3 hello
+printf '[%*.*s]\n' 9 3 hello
+## STDOUT:
+[    hello]
+[hel]
+[      hel]
+[      hel]
+[      hel]
+## END
 
 #### unsigned / octal / hex
 printf '[%u]\n' 42
@@ -408,9 +437,13 @@ echo status=$?
 [$]
 status=0
 ## END
-## N-I osh STDOUT:
-[\044]
-status=2
+
+#### printf %b with \c early return
+printf '[%b]\n' 'ab\ncd\cxy'
+echo $?
+## STDOUT:
+[ab
+cd0
 ## END
 
 #### printf %c -- doesn't respect UTF-8!  Bad.
@@ -444,7 +477,7 @@ status=1
 status=1
 ## END
 # osh emits parse errors
-## OK osh STDOUT:
+## OK dash/osh STDOUT:
 status=2
 status=2
 ## END
@@ -459,7 +492,8 @@ printf '[%q]\n' "$x"
 [a\ b]
 ## END
 ## N-I ash/dash stdout-json: "["
-## N-I ash/dash status: 1
+## N-I ash status: 1
+## N-I dash status: 2
 
 #### printf %6q (width)
 # NOTE: coreutils /usr/bin/printf does NOT implement this %6q !!!
@@ -472,7 +506,8 @@ printf '[%6q]\n' "$x"
 [  a\ b]
 ## END
 ## N-I mksh/ash/dash stdout-json: "["
-## N-I mksh/ash/dash status: 1
+## N-I mksh/ash status: 1
+## N-I dash status: 2
 
 #### printf + and space flags
 # I didn't know these existed -- I only knew about - and 0 !
@@ -491,17 +526,22 @@ printf '[% d]\n' -42
 
 #### printf # flag
 # I didn't know these existed -- I only knew about - and 0 !
-printf '[%#o]\n' 42
-printf '[%#x]\n' 42
-printf '[%#X]\n' 42
+# Note: '#' flag for integers outputs a prefix ONLY WHEN the value is non-zero
+printf '[%#o][%#o]\n' 0 42
+printf '[%#x][%#x]\n' 0 42
+printf '[%#X][%#X]\n' 0 42
 echo ---
-printf '[%#f]\n' 3
+# Note: '#' flag for %f, %g always outputs the decimal point.
+printf '[%.0f][%#.0f]\n' 3 3
+# Note: In addition, '#' flag for %g does not omit zeroes in fraction
+printf '[%g][%#g]\n' 3 3
 ## STDOUT:
-[052]
-[0x2a]
-[0X2A]
+[0][052]
+[0][0x2a]
+[0][0X2A]
 ---
-[3.000000]
+[3][3.]
+[3][3.00000]
 ## END
 ## N-I osh STDOUT:
 ---
@@ -541,15 +581,82 @@ status=1
 ## END
 
 #### %(strftime format)T
+# The result depends on timezone
+export TZ=Asia/Tokyo
+printf '%(%Y-%m-%d)T\n' 1557978599
+export TZ=US/Eastern
 printf '%(%Y-%m-%d)T\n' 1557978599
 echo status=$?
 ## STDOUT:
+2019-05-16
 2019-05-15
 status=0
 ## END
-## N-I dash/mksh/zsh/ash STDOUT:
+## N-I mksh/zsh/ash STDOUT:
 status=1
 ## END
-## N-I osh STDOUT:
+## N-I dash STDOUT:
 status=2
+## END
+
+#### %(strftime format)T doesn't respect TZ if not exported
+
+# note: this test leaks!  It assumes that /etc/localtime is NOT Portugal.
+
+TZ=Portugal  # NOT exported
+localtime=$(printf '%(%Y-%m-%d %H:%M:%S)T\n' 1557978599)
+
+# TZ is respected
+export TZ=Portugal
+tz=$(printf '%(%Y-%m-%d %H:%M:%S)T\n' 1557978599)
+
+#echo $localtime
+#echo $tz
+
+if ! test "$localtime" = "$tz"; then
+  echo 'not equal'
+fi
+## STDOUT:
+not equal
+## END
+## N-I mksh/zsh/ash/dash stdout-json: ""
+
+#### %(strftime format)T TZ in environ but not in shell's memory
+
+# note: this test leaks!  It assumes that /etc/localtime is NOT Portugal.
+
+# TZ is respected
+export TZ=Portugal
+tz=$(printf '%(%Y-%m-%d %H:%M:%S)T\n' 1557978599)
+
+unset TZ  # unset in the shell, but still in the environment
+
+localtime=$(printf '%(%Y-%m-%d %H:%M:%S)T\n' 1557978599)
+
+if ! test "$localtime" = "$tz"; then
+  echo 'not equal'
+fi
+
+## STDOUT:
+not equal
+## END
+## N-I mksh/zsh/ash/dash stdout-json: ""
+
+#### %10.5(strftime format)T
+# The result depends on timezone
+export TZ=Asia/Tokyo
+printf '[%10.5(%Y-%m-%d)T]\n' 1557978599
+export TZ=US/Eastern
+printf '[%10.5(%Y-%m-%d)T]\n' 1557978599
+echo status=$?
+## STDOUT:
+[     2019-]
+[     2019-]
+status=0
+## END
+## N-I dash/mksh/zsh/ash STDOUT:
+[[status=1
+## END
+## N-I dash STDOUT:
+[[status=2
 ## END

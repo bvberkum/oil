@@ -15,12 +15,16 @@ time-tsv() {
   benchmarks/time_.py --tsv "$@"
 }
 
-dummy() {
-  echo 'dummy task with env:'
-  echo
+dump-timezone() {
 
-  # mangles multi-line values, but that's OK here
-  dump-env
+  # On Travis:
+  #  /usr/share/zoneinfo/UTC
+  # On my machine
+  #  /usr/share/zoneinfo/America/Los_Angeles
+
+  read md5 _ <<< $(md5sum /etc/localtime)
+  log "md5 = $md5"
+  find /usr/share/zoneinfo -type f | xargs md5sum | grep $md5
 }
 
 dummy-tasks() {
@@ -28,7 +32,8 @@ dummy-tasks() {
 
   # (task_name, script, action, result_html)
   cat <<EOF
-dummy           services/toil-worker.sh dummy  -
+dump-env      services/toil-worker.sh dump-env      -
+dump-timezone services/toil-worker.sh dump-timezone -
 EOF
 }
 
@@ -72,9 +77,13 @@ ovm-tarball-tasks() {
 
   # (task_name, script, action, result_html)
   cat <<EOF
-download-deps     devtools/release.sh tarball-build-deps -
+tarball-deps      devtools/release.sh tarball-build-deps -
+spec-deps         test/spec-bin.sh all-steps             -
 dev-all           build/dev.sh all                       -
 yajl              build/dev.sh yajl-release              -
+syscall-by-code   test/syscall.sh by-code                _tmp/syscall/by-code.txt
+syscall-by-input  test/syscall.sh by-input               _tmp/syscall/by-input.txt
+osh-spec          test/spec.sh osh-travis                _tmp/spec/osh.html
 make-tarball      devtools/release.sh quick-oil-tarball  -
 build-tarball     build/test.sh oil-tar                  -
 EOF
@@ -101,7 +110,9 @@ run-tasks() {
     local log_path=$out_dir/$task_name.log.txt 
 
     set +o errexit
-    time-tsv -o $tsv --append --field $task_name --field $script --field $action --field $result_html -- \
+    time-tsv -o $tsv --append --time-fmt '%.2f' \
+      --field $task_name --field $script --field $action \
+      --field $result_html -- \
       $script $action >$log_path 2>&1
     status=$?
     set -o errexit

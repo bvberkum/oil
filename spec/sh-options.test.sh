@@ -107,6 +107,36 @@ ___
 ___
 ## END
 
+#### interactive shell starts with emacs mode on
+case $SH in (dash) exit ;; esac
+case $SH in (bash|*osh) flag='--rcfile /dev/null' ;; esac
+
+code='test -o emacs; echo $?; test -o vi; echo $?'
+
+echo non-interactive
+$SH $flag -c "$code"
+
+echo interactive
+$SH $flag -i -c "$code"
+
+## STDOUT:
+non-interactive
+1
+1
+interactive
+0
+1
+## END
+## OK mksh STDOUT:
+non-interactive
+0
+1
+interactive
+0
+1
+## END
+## N-I dash stdout-json: ""
+
 #### nounset
 echo "[$unset]"
 set -o nounset
@@ -305,12 +335,6 @@ g() {
 g
 ## status: 0
 ## STDOUT:
-__GLOBAL='mutated'
-__OTHERLOCAL='L'
-__mylocal='L'
-__var_in_parent_scope='D'
-## END
-## OK bash STDOUT:
 __GLOBAL=mutated
 __OTHERLOCAL=L
 __mylocal=L
@@ -321,6 +345,12 @@ __GLOBAL=mutated
 __var_in_parent_scope=D
 __OTHERLOCAL=L
 __mylocal=L
+## END
+## OK dash STDOUT:
+__GLOBAL='mutated'
+__OTHERLOCAL='L'
+__mylocal='L'
+__var_in_parent_scope='D'
 ## END
 
 #### 'set' and 'eval' round trip

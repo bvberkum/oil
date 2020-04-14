@@ -6,29 +6,148 @@ from __future__ import print_function
 
 from _devbuild.gen.option_asdl import builtin_i
 from _devbuild.gen.runtime_asdl import (
-    value, value_e, value_t, value__MaybeStrArray,
-    lvalue, scope_e,
-    cmd_value__Argv, cmd_value__Assign,
+    value, value_e, value_t, value__Str, value__MaybeStrArray,
+    value__AssocArray,
+    lvalue, lvalue_e, scope_e, cmd_value__Argv, cmd_value__Assign,
 )
-#from core.util import log
+from _devbuild.gen.syntax_asdl import source
+from frontend import arg_def
 from frontend import args
-from frontend import match
+from core import error
+from qsn_ import qsn
 from core import state
+from core import ui
+from core.util import log, e_die
 from mycpp import mylib
 
-from typing import cast, Dict, Tuple, Any, TYPE_CHECKING
+from typing import cast, Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
+  from core import optview
   from core.state import Mem
   from core.ui import ErrorFormatter
+  from frontend.parse_lib import ParseContext
+  from osh.sh_expr_eval import ArithEvaluator
 
-if mylib.PYTHON:
-  from frontend import arg_def
+_ = log
+
+
+def _PrintVariables(mem, cmd_val, arg, print_flags, readonly=False, exported=False):
+  # type: (Mem, value_t, Any, bool, bool, bool) -> int
+  flag_g = getattr(arg, 'g', None)
+  flag_n = getattr(arg, 'n', None)
+  flag_r = getattr(arg, 'r', None)
+  flag_x = getattr(arg, 'x', None)
+  flag_a = getattr(arg, 'a', None)
+  flag_A = getattr(arg, 'A', None)
+
+  lookup_mode = scope_e.Dynamic
+  if cmd_val.builtin_id == builtin_i.local:
+    if flag_g and not mem.IsGlobalScope():
+      return 1
+    lookup_mode = scope_e.LocalOnly
+  elif flag_g:
+    lookup_mode = scope_e.GlobalOnly
+
+  if len(cmd_val.pairs) == 0:
+    print_all = True
+    cells = mem.GetAllCells(lookup_mode)
+    names = sorted(cells)
+  else:
+    print_all = False
+    names = []
+    cells = {}
+    for pair in cmd_val.pairs:
+      name = pair.var_name
+      if pair.rval and pair.rval.tag_() == value_e.Str:
+        name += "=" + cast(value__Str, pair.rval).s
+        names.append(name)
+        cells[name] = None
+      else:
+        names.append(name)
+        cells[name] = mem.GetCell(name, lookup_mode)
+
+  count = 0
+  for name in names:
+    cell = cells[name]
+    if cell is None: continue
+    val = cell.val
+
+    if val.tag_() == value_e.Undef: continue
+    if readonly and not cell.readonly: continue
+    if exported and not cell.exported: continue
+    if flag_n == '-' and not cell.nameref: continue
+    if flag_n == '+' and cell.nameref: continue
+    if flag_r == '-' and not cell.readonly: continue
+    if flag_r == '+' and cell.readonly: continue
+    if flag_x == '-' and not cell.exported: continue
+    if flag_x == '+' and cell.exported: continue
+    if flag_a and val.tag_() != value_e.MaybeStrArray: continue
+    if flag_A and val.tag_() != value_e.AssocArray: continue
+
+    decl = []
+    if print_flags:
+      flags = []
+      if cell.nameref: flags.append('n')
+      if cell.readonly: flags.append('r')
+      if cell.exported: flags.append('x')
+      if val.tag_() == value_e.MaybeStrArray:
+        flags.append('a')
+      elif val.tag_() == value_e.AssocArray:
+        flags.append('A')
+      if len(flags) == 0: flags.append('-')
+
+      decl.extend(["declare -", ''.join(flags), " ", name])
+    else:
+      decl.append(name)
+
+    if val.tag_() == value_e.Str:
+      str_val = cast(value__Str, val)
+      decl.extend(["=", qsn.maybe_shell_encode(str_val.s)])
+    elif val.tag_() == value_e.MaybeStrArray:
+      array_val = cast(value__MaybeStrArray, val)
+      if None in array_val.strs:
+        # Note: Arrays with unset elements are printed in the form:
+        #   declare -p arr=(); arr[3]='' arr[4]='foo' ...
+        decl.append("=()")
+        first = True
+        for i, element in enumerate(array_val.strs):
+          if element is not None:
+            if first:
+              decl.append(";")
+              first = False
+            decl.extend([" ", name, "[", str(i), "]=",
+                         qsn.maybe_shell_encode(element)])
+      else:
+        body = []
+        for element in array_val.strs:
+          if len(body) > 0: body.append(" ")
+          body.append(qsn.maybe_shell_encode(element or ''))
+        decl.extend(["=(", ''.join(body), ")"])
+    elif val.tag_() == value_e.AssocArray:
+      assoc_val = cast(value__AssocArray, val)
+      body = []
+      for key in sorted(assoc_val.d):
+        if len(body) > 0: body.append(" ")
+        key_quoted = qsn.maybe_shell_encode(key, flags=qsn.MUST_QUOTE)
+        value_quoted = qsn.maybe_shell_encode(assoc_val.d[key] or '')
+        body.extend(["[", key_quoted, "]=", value_quoted])
+      if len(body) > 0:
+        decl.extend(["=(", ''.join(body), ")"])
+
+    print(''.join(decl))
+    count += 1
+
+  if print_all or count == len(names):
+    return 0
+  else:
+    return 1
 
 
 if mylib.PYTHON:
   EXPORT_SPEC = arg_def.Register('export')
   EXPORT_SPEC.ShortFlag('-n')
   EXPORT_SPEC.ShortFlag('-f')  # stubbed
+  EXPORT_SPEC.ShortFlag('-p')
   # Instead of Reader?  Or just make everything take a reader/
   # They should check for extra args?
   #spec.AcceptsCmdVal()
@@ -60,6 +179,9 @@ class Export(object):
       raise args.UsageError(
           "doesn't accept -f because it's dangerous.  (The code can usually be restructured with 'source')")
 
+    if arg.p or len(cmd_val.pairs) == 0:
+      return _PrintVariables(self.mem, cmd_val, arg, True, exported=True)
+
     positional = cmd_val.argv[arg_index:]
     if arg.n:
       for pair in cmd_val.pairs:
@@ -67,18 +189,18 @@ class Export(object):
           raise args.UsageError("doesn't accept RHS with -n", span_id=pair.spid)
 
         # NOTE: we don't care if it wasn't found, like bash.
-        self.mem.ClearFlag(pair.lval.name, state.ClearExport, scope_e.Dynamic)
+        self.mem.ClearFlag(pair.var_name, state.ClearExport, scope_e.Dynamic)
     else:
       for pair in cmd_val.pairs:
         # NOTE: when rval is None, only flags are changed
-        self.mem.SetVar(pair.lval, pair.rval, scope_e.Dynamic,
+        self.mem.SetVar(lvalue.Named(pair.var_name), pair.rval, scope_e.Dynamic,
                         flags=state.SetExport)
 
     return 0
 
 
-def _ReconcileTypes(rval, arg, errfmt, span_id):
-  # type: (value_t, Any, ErrorFormatter, int) -> value_t
+def _ReconcileTypes(rval, arg, span_id):
+  # type: (value_t, Any, int) -> value_t
   """Check that -a and -A flags are consistent with RHS.
 
   Special case: () is allowed to mean empty indexed array or empty assoc array
@@ -112,6 +234,7 @@ if mylib.PYTHON:
 # TODO: Check the consistency of -a and -A against values, here and below.
   READONLY_SPEC.ShortFlag('-a')
   READONLY_SPEC.ShortFlag('-A')
+  READONLY_SPEC.ShortFlag('-p')
 
 
 class Readonly(object):
@@ -126,6 +249,9 @@ class Readonly(object):
     arg_r.Next()
     arg, arg_index = READONLY_SPEC.Parse(arg_r)
 
+    if arg.p or len(cmd_val.pairs) == 0:
+      return _PrintVariables(self.mem, cmd_val, arg, True, readonly=True)
+
     for pair in cmd_val.pairs:
       if pair.rval is None:
         if arg.a:
@@ -137,12 +263,12 @@ class Readonly(object):
       else:
         rval = pair.rval
 
-      rval = _ReconcileTypes(rval, arg, self.errfmt, pair.spid)
+      rval = _ReconcileTypes(rval, arg, pair.spid)
 
       # NOTE:
       # - when rval is None, only flags are changed
       # - dynamic scope because flags on locals can be changed, etc.
-      self.mem.SetVar(pair.lval, rval, scope_e.Dynamic,
+      self.mem.SetVar(lvalue.Named(pair.var_name), rval, scope_e.Dynamic,
                       flags=state.SetReadOnly)
 
     return 0
@@ -178,6 +304,17 @@ class NewVar(object):
     self.funcs = funcs
     self.errfmt = errfmt
 
+  def _PrintFuncs(self, names):
+    status = 0
+    for name in names:
+      if name in self.funcs:
+        print(name)
+        # TODO: Could print LST for -f, or render LST.  Bash does this.  'trap'
+        # could use that too.
+      else:
+        status = 1
+    return status
+
   def Run(self, cmd_val):
     # type: (cmd_value__Assign) -> int
     arg_r = args.Reader(cmd_val.argv, spids=cmd_val.arg_spids)
@@ -186,39 +323,29 @@ class NewVar(object):
 
     status = 0
 
-    # NOTE: in bash, -f shows the function body, while -F shows the name.  In
-    # osh, they're identical and behave like -F.
-    if arg.f or arg.F:  # Lookup and print functions.
-      names = [pair.lval.name for pair in cmd_val.pairs]
+    if arg.f:
+      names = arg_r.Rest()
       if names:
-        for name in names:
-          if name in self.funcs:
-            print(name)
-            # TODO: Could print LST, or render LST.  Bash does this.  'trap' too.
-            #print(funcs[name])
-          else:
-            status = 1
-      elif arg.F:
+        # NOTE: in bash, -f shows the function body, while -F shows the name.
+        # Right now we just show the name.
+        status = self._PrintFuncs(names)
+      else:
+        raise args.UsageError('passed -f without args')
+      return status
+
+    if arg.F:
+      names = arg_r.Rest()
+      if names:
+        status = self._PrintFuncs(names)
+      else:  # weird bash quirk: they're printed in a different format!
         for func_name in sorted(self.funcs):
           print('declare -f %s' % (func_name))
-      else:
-        raise args.UsageError('declare/typeset -f without args')
       return status
 
     if arg.p:  # Lookup and print variables.
-      names = [pair.lval.name for pair in cmd_val.pairs]
-      if names:
-        for name in names:
-          val = self.mem.GetVar(name)
-          if val.tag != value_e.Undef:
-            # TODO: Print flags.
-
-            print(name)
-          else:
-            status = 1
-      else:
-        raise args.UsageError('declare/typeset -p without args')
-      return status
+      return _PrintVariables(self.mem, cmd_val, arg, True)
+    elif len(cmd_val.pairs) == 0:
+      return _PrintVariables(self.mem, cmd_val, arg, False)
 
     #
     # Set variables
@@ -260,8 +387,8 @@ class NewVar(object):
       else:
         rval = pair.rval
 
-      rval = _ReconcileTypes(rval, arg, self.errfmt, pair.spid)
-      self.mem.SetVar(pair.lval, rval, lookup_mode, flags=flags)
+      rval = _ReconcileTypes(rval, arg, pair.spid)
+      self.mem.SetVar(lvalue.Named(pair.var_name), rval, lookup_mode, flags=flags)
 
     return status
 
@@ -273,28 +400,65 @@ if mylib.PYTHON:
 
 
 # TODO:
-# - Parse lvalue expression: unset 'a[ i - 1 ]'.  Static or dynamic parsing?
 # - It would make more sense to treat no args as an error (bash doesn't.)
 #   - Should we have strict builtins?  Or just make it stricter?
 
 class Unset(object):
-  def __init__(self, mem, funcs, errfmt):
-    # type: (Mem, Dict[str, Any], ErrorFormatter) -> None
+
+  def __init__(self, mem, exec_opts, funcs, parse_ctx, arith_ev, errfmt):
+    # type: (Mem, optview.Exec, Dict[str, Any], ParseContext, ArithEvaluator, ErrorFormatter) -> None
     self.mem = mem
+    self.exec_opts = exec_opts
     self.funcs = funcs
+    self.parse_ctx = parse_ctx
+    self.arith_ev = arith_ev
     self.errfmt = errfmt
 
-  def _UnsetVar(self, name, spid):
-    # type: (str, int) -> Tuple[bool, bool]
-    if not match.IsValidVarName(name):
-      raise args.UsageError(
-          'got invalid variable name %r' % name, span_id=spid)
+  def _UnsetVar(self, arg, spid, proc_fallback):
+    # type: (str, int, bool) -> bool
+    """
+    Returns:
+      bool: whether the 'unset' builtin should succeed with code 0.
+    """
+    arena = self.parse_ctx.arena
 
-    ok, found = self.mem.Unset(lvalue.Named(name), scope_e.Dynamic)
-    if not ok:
-      self.errfmt.Print("Can't unset readonly variable %r", name,
-                        span_id=spid)
-    return ok, found
+    a_parser = self.parse_ctx.MakeArithParser(arg)
+    arena.PushSource(source.ArgvWord(spid))
+    try:
+      anode = a_parser.Parse()
+    except error.Parse as e:
+      # show parse error
+      ui.PrettyPrintError(e, arena)
+      # point to word
+      raise args.UsageError('Invalid unset expression', span_id=spid)
+    finally:
+      arena.PopSource()
+
+    lval = self.arith_ev.EvalArithLhs(anode, spid)
+
+    # Prevent attacks like these by default:
+    #
+    # unset -v 'A["$(echo K; rm *)"]'
+    if not self.exec_opts.eval_unsafe_arith() and lval.tag_() != lvalue_e.Named:
+      e_die('Expected a variable name.  Expressions are allowed with shopt -s eval_unsafe_arith', span_id=spid)
+
+    #log('lval %s', lval)
+    found = False
+    try:
+      # not strict
+      found = self.mem.Unset(lval, scope_e.Dynamic, False)
+    except error.Runtime as e:
+      # note: in bash, myreadonly=X fails, but declare myreadonly=X doens't
+      # fail because it's a builtin.  So I guess the same is true of 'unset'.
+      e.span_id = spid
+      ui.PrettyPrintError(e, arena)
+      return False
+
+    if proc_fallback and not found:
+      if arg in self.funcs:
+        del self.funcs[arg]
+
+    return True
 
   def Run(self, cmd_val):
     # type: (cmd_value__Argv) -> int
@@ -308,20 +472,15 @@ class Unset(object):
       if arg.f:
         if name in self.funcs:
           del self.funcs[name]
+
       elif arg.v:
-        ok, _ = self._UnsetVar(name, spid)
-        if not ok:
-          return 1
-      else:
-        # Try to delete var first, then func.
-        ok, found = self._UnsetVar(name, spid)
-        if not ok:
+        if not self._UnsetVar(name, spid, False):
           return 1
 
-        #log('%s: %s', name, found)
-        if not found:
-          if name in self.funcs:
-            del self.funcs[name]
+      else:
+        # proc_fallback: Try to delete var first, then func.
+        if not self._UnsetVar(name, spid, True):
+          return 1
 
     return 0
 

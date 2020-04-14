@@ -14,12 +14,12 @@ using id_kind_asdl::Kind_t;
 #include "consts.h"
 
 // oil/cpp
-#include "asdl_pretty.h"
 #include "core_error.h"
 #include "frontend_match.h"
 #include "frontend_tdop.h"
 #include "osh_arith_parse.h"
 #include "pgen2_parse.h"
+#include "qsn_qsn.h"
 // added for osh_eval
 #include "core_passwd.h"
 #include "osh_bool_stat.h"
@@ -43,6 +43,13 @@ class RuntimeError {
 class ValueError {};
 
 class KeyboardInterrupt {};
+
+class SystemExit {
+ public:
+  SystemExit(int status) : status_(status) {
+  }
+ int status_;
+};
 
 // Hack for now.  Every sum type should have repr()?
 Str* repr(syntax_asdl::source_t* obj) {

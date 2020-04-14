@@ -9,13 +9,18 @@ from __future__ import print_function
 import signal  # for calculating numbers
 
 from _devbuild.gen.runtime_asdl import (
-    cmd_value__Argv,
+    cmd_value, cmd_value__Argv,
     job_status_e, job_status__Proc, job_status__Pipeline,
 )
+from _devbuild.gen.syntax_asdl import source
+from asdl import runtime
+from core import error
+from core import main_loop
 from core import ui
 from core.util import log
 from frontend import args
 from frontend import arg_def
+from frontend import reader
 from mycpp import mylib
 from mycpp.mylib import tagswitch
 from osh.builtin_misc import _Builtin
@@ -26,9 +31,53 @@ from typing import List, Dict, Any, cast, TYPE_CHECKING
 if TYPE_CHECKING:
   from _devbuild.gen.syntax_asdl import command_t
   from core.ui import ErrorFormatter
-  from core.process import JobState, Waiter, SignalState
-  from osh.cmd_exec import Executor
-  from core.state import Mem
+  from core.process import (
+      ExternalProgram, FdState, JobState, SignalState, Waiter
+  )
+  from core.state import Mem, SearchPath
+  from frontend.parse_lib import ParseContext
+
+
+if mylib.PYTHON:
+  EXEC_SPEC = arg_def.Register('exec')
+
+
+class Exec(object):
+
+  def __init__(self, mem, ext_prog, fd_state, search_path, errfmt):
+    # type: (Mem, ExternalProgram, FdState, SearchPath, ErrorFormatter) -> None
+    self.mem = mem
+    self.ext_prog = ext_prog
+    self.fd_state = fd_state
+    self.search_path = search_path
+    self.errfmt = errfmt
+
+  def Run(self, cmd_val):
+    # type: (cmd_value__Argv) -> int
+
+    arg_r = args.Reader(cmd_val.argv, spids=cmd_val.arg_spids)
+    arg_r.Next()  # skip 'exec'
+    _ = EXEC_SPEC.Parse(arg_r)  # no flags now, but accepts --
+
+    # Apply redirects in this shell.  # NOTE: Redirects were processed earlier.
+    if arg_r.AtEnd():
+      self.fd_state.MakePermanent()
+      return 0
+
+    environ = self.mem.GetExported()
+    i = arg_r.i
+    cmd = cmd_val.argv[i]
+    argv0_path = self.search_path.CachedLookup(cmd)
+    if argv0_path is None:
+      self.errfmt.Print('exec: %r not found', cmd,
+                        span_id=cmd_val.arg_spids[1])
+      raise SystemExit(127)  # exec builtin never returns
+
+    # shift off 'exec'
+    c2 = cmd_value.Argv(cmd_val.argv[i:], cmd_val.arg_spids[i:], cmd_val.block)
+    self.ext_prog.Exec(argv0_path, c2, environ)  # NEVER RETURNS
+    assert False, "This line should never be reached" # makes mypy happy
+
 
 
 if mylib.PYTHON:
@@ -302,18 +351,44 @@ if mylib.PYTHON:
 # OVM match sh/bash more closely.
 
 class Trap(object):
-  def __init__(self, sig_state, traps, nodes_to_run, ex, errfmt):
-    # type: (SignalState, Dict[str, _TrapHandler], List[command_t], Executor, ErrorFormatter) -> None
+  def __init__(self, sig_state, traps, nodes_to_run, parse_ctx, errfmt):
+    # type: (SignalState, Dict[str, _TrapHandler], List[command_t], ParseContext, ErrorFormatter) -> None
     self.sig_state = sig_state
     self.traps = traps
     self.nodes_to_run = nodes_to_run
-    self.ex = ex  # TODO: ParseTrapCode could be inlined below
+    self.parse_ctx = parse_ctx
+    self.arena = parse_ctx.arena
     self.errfmt = errfmt
+
+  def _ParseTrapCode(self, code_str):
+    # type: (str) -> command_t
+    """
+    Returns:
+      A node, or None if the code is invalid.
+    """
+    line_reader = reader.StringLineReader(code_str, self.arena)
+    c_parser = self.parse_ctx.MakeOshParser(line_reader)
+
+    # TODO: the SPID should be passed through argv
+    self.arena.PushSource(source.Trap(runtime.NO_SPID))
+    try:
+      try:
+        node = main_loop.ParseWholeFile(c_parser)
+      except error.Parse as e:
+        ui.PrettyPrintError(e, self.arena)
+        return None
+
+    finally:
+      self.arena.PopSource()
+
+    return node
 
   def Run(self, cmd_val):
     # type: (cmd_value__Argv) -> int
 
-    arg, _ = TRAP_SPEC.ParseCmdVal(cmd_val)
+    arg_r = args.Reader(cmd_val.argv, spids=cmd_val.arg_spids)
+    arg_r.Next()  # skip 'trap'
+    arg, _ = TRAP_SPEC.Parse(arg_r)
 
     if arg.p:  # Print registered handlers
       for name, value in self.traps.iteritems():
@@ -334,8 +409,6 @@ class Trap(object):
 
       return 0
 
-    arg_r = args.Reader(cmd_val.argv, spids=cmd_val.arg_spids)
-    arg_r.Next()  # skip argv[0]
     code_str = arg_r.ReadRequired('requires a code string')
     sig_spec, sig_spid = arg_r.ReadRequired2('requires a signal or hook name')
 
@@ -378,7 +451,7 @@ class Trap(object):
       raise AssertionError('Signal or trap')
 
     # Try parsing the code first.
-    node = self.ex.ParseTrapCode(code_str)
+    node = self._ParseTrapCode(code_str)
     if node is None:
       return 1  # ParseTrapCode() prints an error for us.
 

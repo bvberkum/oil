@@ -181,6 +181,75 @@ cat $TMP/named-fd.txt
 ## N-I dash/mksh stdout-json: ""
 ## N-I dash/mksh status: 127
 
+#### Double digit fd (20> file)
+exec 20> "$TMP/double-digit-fd.txt"
+echo hello20 >&20
+cat "$TMP/double-digit-fd.txt"
+## stdout: hello20
+## BUG dash stdout-json: ""
+## BUG dash status: 127
+
+#### : 9> fdleak (OSH regression)
+true 9> "$TMP/fd.txt"
+( echo world >&9 )
+cat "$TMP/fd.txt"
+## stdout-json: ""
+
+#### : 3>&3 (OSH regression)
+: 3>&3
+echo hello
+## stdout: hello
+## BUG mksh stdout-json: ""
+## BUG mksh status: 1
+
+#### : 3>&3-
+: 3>&3-
+echo hello
+## stdout: hello
+## N-I dash/mksh stdout-json: ""
+## N-I mksh status: 1
+## N-I dash status: 2
+
+#### 3>&- << EOF (OSH regression: fail to restore fds)
+exec 3> "$TMP/fd.txt"
+echo hello 3>&- << EOF
+EOF
+echo world >&3
+exec 3>&-  # close
+cat "$TMP/fd.txt"
+## STDOUT:
+hello
+world
+## END
+
+#### Open file on descriptor 3 and write to it many times
+
+# different than case below because 3 is the likely first FD of open()
+
+exec 3> "$TMP/fd3.txt"
+echo hello >&3
+echo world >&3
+exec 3>&-  # close
+cat "$TMP/fd3.txt"
+## STDOUT:
+hello
+world
+## END
+
+#### Open file on descriptor 4 and write to it many times
+
+# different than the case above because because 4 isn't the likely first FD
+
+exec 4> "$TMP/fd4.txt"
+echo hello >&4
+echo world >&4
+exec 4>&-  # close
+cat "$TMP/fd4.txt"
+## STDOUT:
+hello
+world
+## END
+
 #### Redirect function stdout
 f() { echo one; echo two; }
 f > $TMP/redirect-func.txt
@@ -217,18 +286,23 @@ echo DONE
 ## OK dash status: 2
 
 #### Redirect to file descriptor that's not open
-# BUGS:
-# - dash doesn't allow file descriptors greater than 9.  (This is a good thing,
-# because the bash chapter in AOSA book mentions that juggling user vs. system
-# file descriptors is a huge pain.)
-# - But somehow running in parallel under spec-runner.sh changes whether descriptor
-# 3 is open.  e.g. 'echo hi 1>&3'.  Possibly because of /usr/bin/time.  The
-# _tmp/spec/*.task.txt file gets corrupted!
+# Notes:
+# - dash doesn't allow file descriptors greater than 9.  (This is a good
+#   thing, because the bash chapter in AOSA book mentions that juggling user
+#   vs.  system file descriptors is a huge pain.)
+# - But somehow running in parallel under spec-runner.sh changes whether
+#   descriptor 3 is open.  e.g. 'echo hi 1>&3'.  Possibly because of
+#   /usr/bin/time.  The _tmp/spec/*.task.txt file gets corrupted!
 # - Oh this is because I use time --output-file.  That opens descriptor 3.  And
 #   then time forks the shell script.  The file descriptor table is inherited.
 #   - You actually have to set the file descriptor to something.  What do
 #   configure and debootstrap too?
-echo hi 1>&9
+
+# 3/2020 note: file descriptor 9 failed on Travis, so I changed it to 8.  The
+# process state isn't necessarly clean.  TODO: Close the descriptor when OSH
+# supports it?
+
+echo hi 1>&8
 ## status: 1
 ## OK dash status: 2
 
@@ -272,15 +346,41 @@ ok
 ## N-I dash stderr: STDERR
 ## N-I dash status: 1
 
-#### 1>&2- to close file descriptor
-# NOTE: "hi\n" goes to stderr, but it's hard to test this because other shells
-# put errors on stderr.
-echo hi 1>&2-
-## stdout-json: ""
+#### 1>&- to close file descriptor
+exec 5> "$TMP/f.txt"
+echo hello >&5
+exec 5>&-
+echo world >&5
+cat "$TMP/f.txt"
+## stdout-json: "hello\n"
+
+#### 1>&2- to move file descriptor
+exec 5> "$TMP/f.txt"
+echo hello5 >&5
+exec 6>&5-
+echo world5 >&5
+echo world6 >&6
+exec 6>&-
+cat "$TMP/f.txt"
+## stdout-json: "hello5\nworld6\n"
 ## N-I dash status: 2
 ## N-I dash stdout-json: ""
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
+
+#### 1>&2- (Bash bug: fail to restore closed fd)
+exec 7> "$TMP/f.txt"
+: 8>&7 7>&-
+echo hello >&7
+: 8>&7-
+echo world >&7
+exec 7>&-
+cat "$TMP/f.txt"
+## status: 2
+## stdout-json: ""
+## OK mksh status: 1
+## BUG bash status: 0
+## BUG bash stdout: hello
 
 #### <> for read/write
 echo first >$TMP/rw.txt
@@ -291,6 +391,18 @@ echo second 1>&8
 echo CONTENTS
 cat $TMP/rw.txt
 ## stdout-json: "line=first\nCONTENTS\nfirst\nsecond\n"
+
+#### <> for read/write named pipes
+rm -f "$TMP/f.pipe"
+mkfifo "$TMP/f.pipe"
+exec 8<> "$TMP/f.pipe"
+echo first >&8
+echo second >&8
+read line1 <&8
+read line2 <&8
+exec 8<&-
+echo line1=$line1 line2=$line2
+## stdout: line1=first line2=second
 
 #### &>> appends stdout and stderr
 
@@ -325,7 +437,6 @@ done
 ## END
 
 #### >$file touches a file
-cd $TMP
 rm -f myfile
 test -f myfile
 echo status=$?
@@ -340,18 +451,65 @@ status=0
 ## stderr-json: ""
 
 #### $(< $file) yields the contents of the file
-# note that it doesn't do this without a command sub!
-cd $TMP
+
 echo FOO > myfile
 foo=$(< myfile)
 echo $foo
 ## STDOUT:
 FOO
 ## END
-## N-I dash stdout:
+## N-I dash/ash/yash stdout-json: "\n"
+
+#### $(< file) with more statements
+
+# note that it doesn't do this without a command sub!
+# It's apparently a special case in bash, mksh, and zsh?
+foo=$(echo begin; < myfile)
+echo $foo
+echo ---
+
+foo=$(< myfile; echo end)
+echo $foo
+echo ---
+
+foo=$(< myfile; <myfile)
+echo $foo
+echo ---
+
+## STDOUT:
+begin
+---
+end
+---
+
+---
+## END
+# weird, zsh behaves differently
+## OK zsh STDOUT:
+begin
+FOO
+---
+FOO
+end
+---
+FOO
+FOO
+---
+## END
+
+
+#### < file in pipeline and subshell doesn't work
+echo FOO > file2
+
+# This only happens in command subs, which is weird
+< file2 | tr A-Z a-z
+( < file2 )
+echo end
+## STDOUT:
+end
+## END
 
 #### 2>&1 with no command
-cd $TMP
 ( exit 42 )  # status is reset after this
 echo status=$?
 2>&1
@@ -363,7 +521,6 @@ status=0
 ## stderr-json: ""
 
 #### 2&>1 (is it a redirect or is it like a&>1)
-cd $TMP
 2&>1
 echo status=$?
 ## STDOUT:
@@ -371,4 +528,26 @@ status=127
 ## END
 ## OK mksh/dash STDOUT:
 status=0
+## END
+
+#### can't mention big file descriptor
+echo hi 9>&1
+# 23 is the max descriptor fo rmksh
+#echo hi 24>&1
+echo hi 99>&1
+echo hi 100>&1
+## OK osh STDOUT:
+hi
+hi
+hi 100
+## END
+## STDOUT:
+hi
+hi 99
+hi 100
+## END
+## BUG bash STDOUT:
+hi
+hi
+hi
 ## END

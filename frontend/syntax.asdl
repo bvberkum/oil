@@ -17,11 +17,6 @@
 -- * coprocesses -- one with arg and one without
 -- * select block
 -- * case fallthrough ;& and ;;&
--- * 1>&2- to close redirect
--- * named descriptors (bash): cmd {fd1}>left.txt {fd2}>right.txt
-
--- Parsed but Not Implemented:
--- * <> redirect
 
 -- TODO: Preserve these source differences:
 -- * order of redirects: 'echo >out.txt hi'  vs echo hi >out.txt
@@ -29,7 +24,6 @@
 -- Refactorings:
 --
 --   cmd_token = Word %compound_word | Token %Token
---   arith_expr = Word %compound_word | VarRef %Token
 --   bool_expr = WordTest %compound_word | ...
 --
 -- Many %Token references:
@@ -38,7 +32,6 @@
 --   printf_part ...
 --
 -- Size optimization:
---   'Token left' should really be 'speck left'.  Saves a lot of space.
 --   SimpleVarSub(Token token) could be optimized
 --   SimpleVarSub(id id, string val, int span_id) without useless token 'tag'
 --   Or VarSubSpecial(id id, int span_id)
@@ -119,7 +112,7 @@ module syntax
   | ArrayIndex(arith_expr expr)
 
   suffix_op = 
-    Nullary(id op_id)  -- ${x@Q} or ${!prefix@} (which also has prefix_op)
+    Nullary %Token  -- ${x@Q} or ${!prefix@} (which also has prefix_op)
   | Unary(id op_id, word arg_word)  -- e.g. ${v:-default}
     -- TODO: token for / to attribute errors
   | PatSub(word pat, word? replace, id replace_mode)
@@ -142,9 +135,7 @@ module syntax
       suffix_op? suffix_op
   ) attributes (int* spids)
 
-  command_sub = (
-      Token left_token, command command_list
-  ) attributes (int* spids)
+  command_sub = (Token left_token, command child) attributes (int* spids)
 
   -- Note: can be word.BracedTree
   sh_array_literal = (Token left, word* words) attributes (int* spids)
@@ -193,6 +184,7 @@ module syntax
     -- usages may be cosmetic, because e.g. compound_word will have zero parts
     -- in the assoc array literal A=([k]=)
     Empty
+    -- Returns from WordParser, but not generally stored in LST (TODO: cmd_token)
   | Token %Token
     -- A Compound word can contain any word_part except the Braced*Part.
     -- We could model this with another variant type but it incurs runtime
@@ -203,6 +195,7 @@ module syntax
     -- contains any type of word_part.
   | BracedTree(word_part* parts)
     -- For dynamic parsing of test/[ -- the string is already evaluated.
+    -- note: this could also be Token
   | String(id id, string s, int span_id)
 
   -- TODO: Need more tokens/spids to translate a[x++]=1
@@ -218,15 +211,14 @@ module syntax
   attributes (int* spids)
 
   arith_expr =
-    VarRef(Token token)  -- variable without $
-  | ArithWord(word w)  -- a string that looks like an integer
+    VarRef %Token  -- variable without $
+  | Word %compound_word  -- a string that looks like an integer
 
-    -- TODO: instead of sh_lhs_expr, could be arith_expr with
-    -- VarRef|ArithWord|Binary for a[]
-  | UnaryAssign(id op_id, sh_lhs_expr child)
-  | BinaryAssign(id op_id, sh_lhs_expr left, arith_expr right)
+  | UnaryAssign(id op_id, arith_expr child)
+  | BinaryAssign(id op_id, arith_expr left, arith_expr right)
+
   | Unary(id op_id, arith_expr child)
-    -- TODO: add token/speck for divide by zero
+    -- TODO: op should be token, e.g. for divide by zero
   | Binary(id op_id, arith_expr left, arith_expr right)
   | TernaryOp(arith_expr cond, arith_expr true_expr, arith_expr false_expr)
 
@@ -238,13 +230,14 @@ module syntax
   | LogicalAnd(bool_expr left, bool_expr right)
   | LogicalOr(bool_expr left, bool_expr right)
 
-  redir = 
-    Redir(Token op, int fd, word arg_word)
-  | HereDoc(Token op, int fd,
-            word here_begin,  -- e.g. EOF or 'EOF'
-            int here_end_span_id,  -- this span is an entire line
-            word_part* stdin_parts -- one for each line
-           )
+  redir_loc = Fd(int fd) | VarName(string name)
+  redir_param =
+    Word %compound_word
+  | MultiLine(word here_begin,  -- e.g. EOF or 'EOF'
+              int here_end_span_id,  -- this span is an entire line
+              word_part* stdin_parts -- one for each line
+              )
+  redir = (Token op, redir_loc loc, redir_param arg)
 
   assign_op = Equal | PlusEqual
   assign_pair = (sh_lhs_expr lhs, assign_op op, word? rhs, int* spids)
@@ -258,8 +251,11 @@ module syntax
 
   command = 
     NoOp
-    -- NOTE: block is always a BraceGroup.
-  | Simple(word* words, redir* redirects, env_pair* more_env, command? block)
+    -- notes:
+    -- * block is always a BraceGroup
+    -- * do_fork is semantic, not syntactic
+  | Simple(word* words, redir* redirects, env_pair* more_env, command? block,
+           bool do_fork)
     -- This doesn't technically belong in the LST, but it's convenient for
     -- execution
   | ExpandedAlias(command child, redir* redirects, env_pair* more_env)
@@ -271,13 +267,12 @@ module syntax
     -- stderr_indices
   | Pipeline(command* children, bool negated, int* stderr_indices)
   | AndOr(id* ops, command* children)
-    -- Part of for, while, until (but not if, case, ShFunction)
-  | DoGroup(command* children, redir* redirects)
+    -- Part of for, while, until (but not if, case, ShFunction).  No redirects.
+  | DoGroup(command* children)
     -- A brace group is a compound command, with redirects.
-    -- TODO: Combine DoGroup and BraceGroup, with 'Token left' for do or {
   | BraceGroup(command* children, redir* redirects)
     -- Contains a single child, like CommandSub
-  | Subshell(command command_list, redir* redirects)
+  | Subshell(command child, redir* redirects)
   | DParen(arith_expr child, redir* redirects)
   | DBracket(bool_expr expr, redir* redirects)
     -- do_arg_iter: whether to implicitly loop over "$@"
@@ -294,8 +289,11 @@ module syntax
   | Case(word to_match, case_arm* arms, redir* redirects)
   | ShFunction(string name, command body)
   | TimeBlock(command pipeline)
-    -- Most nodes optimize it out as command*, but there are a few places where
-    -- this is useful for type safety.
+    -- Some nodes optimize it out as command*, but we use this for
+    -- 1. the top level
+    -- 2. ls ; ls & ls  (same line)
+    -- 3. command_sub -- single child that's a CommandList
+    -- 4. Subshell -- single child that's a CommandList
   | CommandList(command* children)
 
     -- Oil stuff
@@ -349,7 +347,7 @@ module syntax
     Literal(Token token)
     -- flags are 0 hyphen space + #
     -- type is 's' for %s, etc.
-  | Percent(Token? flag, Token? width, Token? precision, Token type)
+  | Percent(Token* flags, Token? width, Token? precision, Token type)
 
   --
   -- OIL LANGUAGE

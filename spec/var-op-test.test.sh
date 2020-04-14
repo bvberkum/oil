@@ -120,3 +120,64 @@ x
 hello=x
 hello=x
 ## END
+ 
+#### array ${arr[0]=x}
+arr=()
+echo ${#arr[@]}
+: ${arr[0]=x}
+echo ${#arr[@]}
+## STDOUT:
+0
+1
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+
+#### assoc array ${arr["k"]=x}
+# note: this also works in zsh
+
+declare -A arr=()
+echo ${#arr[@]}
+: ${arr['k']=x}
+echo ${#arr[@]}
+## STDOUT:
+0
+1
+## END
+## N-I dash status: 2
+## N-I dash stdout-json: ""
+## N-I mksh status: 1
+## N-I mksh stdout-json: ""
+
+#### "\z" as arg
+echo "${undef-\$}"
+echo "${undef-\(}"
+echo "${undef-\z}"
+echo "${undef-\"}"
+echo "${undef-\`}"
+echo "${undef-\\}"
+## STDOUT:
+$
+\(
+\z
+"
+`
+\
+## END
+## BUG yash STDOUT:
+$
+(
+z
+"
+`
+\
+## END
+
+#### "\e" as arg
+echo "${undef-\e}"
+## STDOUT:
+\e
+## END
+## BUG zsh/mksh stdout-repr: '\x1b\n'
+## BUG yash stdout: e
+

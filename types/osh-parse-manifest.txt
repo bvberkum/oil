@@ -1,9 +1,9 @@
 ./asdl/format.py
-./asdl/pretty.py
 ./asdl/pybase.py
 ./asdl/runtime.py
 ./bin/osh_parse.py
 ./core/alloc.py
+./core/ansi.py
 ./core/error.py
 ./core/meta.py
 ./core/optview.py
@@ -40,3 +40,4 @@
 ./pgen2/pnode.py
 ./pylib/cgi.py
 ./pylib/os_path.py
+./qsn_/qsn.py

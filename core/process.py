@@ -18,10 +18,14 @@ from _devbuild.gen.id_kind_asdl import Id
 from _devbuild.gen.runtime_asdl import (
     job_state_e, job_state_t,
     job_status, job_status_t,
-    redirect_e, redirect_t,
-    redirect__Path, redirect__FileDesc, redirect__HereDoc,
+    redirect, redirect_arg_e, redirect_arg__Path, redirect_arg__CopyFd,
+    redirect_arg__MoveFd, redirect_arg__HereDoc,
+    value, value_e, lvalue, scope_e, value__Str,
 )
-from asdl import pretty
+from _devbuild.gen.syntax_asdl import (
+    redir_loc, redir_loc_e, redir_loc_t, redir_loc__VarName, redir_loc__Fd,
+)
+from qsn_ import qsn
 from core import util
 from core import ui
 from core.util import log
@@ -39,9 +43,20 @@ if TYPE_CHECKING:
   from core.util import NullDebugFile
   from core.comp_ui import _IDisplay
   from core import optview
-  from osh.cmd_exec import Executor
-  from core.state import SearchPath
+  from osh.cmd_eval import CommandEvaluator
+  from core.state import Mem
   from mycpp import mylib
+
+
+NO_FD = -1
+
+# Minimum file descriptor that the shell can use.  Other descriptors can be
+# directly used by user programs, e.g. exec 9>&1
+#
+# Oil uses 100 because users are allowed TWO digits in frontend/lexer_def.py.
+# This is a compromise between bash (unlimited, but requires crazy
+# bookkeeping), and dash/zsh (10) and mksh (24)
+_SHELL_MIN_FD = 100
 
 
 def SignalState_AfterForkingChild():
@@ -102,20 +117,22 @@ class SignalState(object):
 class _FdFrame(object):
   def __init__(self):
     # type: () -> None
-    self.saved = []  # type: List[Tuple[int, int]]
-    self.need_close = []  # type: List[int]
+    self.saved = []  # type: List[Tuple[int, int, bool]]
     self.need_wait = []  # type: List[Tuple[Process, Waiter]]
 
   def Forget(self):
     # type: () -> None
     """For exec 1>&2."""
+    for saved, orig, forget in reversed(self.saved):
+      if saved != NO_FD and forget:
+        posix.close(saved)
+
     del self.saved[:]  # like list.clear() in Python 3.3
-    del self.need_close[:]
     del self.need_wait[:]
 
   def __repr__(self):
     # type: () -> str
-    return '<_FdFrame %s %s>' % (self.saved, self.need_close)
+    return '<_FdFrame %s>' % self.saved
 
 
 class FdState(object):
@@ -123,8 +140,8 @@ class FdState(object):
 
   For example, you can do 'myfunc > out.txt' without forking.
   """
-  def __init__(self, errfmt, job_state):
-    # type: (ErrorFormatter, JobState) -> None
+  def __init__(self, errfmt, job_state, mem=None):
+    # type: (ErrorFormatter, JobState, Mem) -> None
     """
     Args:
       errfmt: for errors
@@ -134,23 +151,7 @@ class FdState(object):
     self.job_state = job_state
     self.cur_frame = _FdFrame()  # for the top level
     self.stack = [self.cur_frame]
-
-  # TODO: Use fcntl(F_DUPFD) and look at the return value!  I didn't understand
-  # the difference.
-
-  def _GetFreeDescriptor(self):
-    # type: () -> int
-    """Return a free file descriptor above 10 that isn't used."""
-    fd = 10
-    while True:
-      try:
-        fcntl.fcntl(fd, fcntl.F_GETFD)
-      except IOError as e:
-        if e.errno == errno.EBADF:
-          break
-      fd += 1
-
-    return fd
+    self.mem = mem
 
   def Open(self, path, mode='r'):
     # type: (str, str) -> mylib.LineReader
@@ -170,76 +171,153 @@ class FdState(object):
       raise AssertionError(mode)
 
     fd = posix.open(path, fd_mode, 0o666)  # may raise OSError
-    new_fd = self._GetFreeDescriptor()
-    posix.dup2(fd, new_fd)
+
+    # Immediately move it to a new location
+    new_fd = fcntl.fcntl(fd, fcntl.F_DUPFD, _SHELL_MIN_FD)
     posix.close(fd)
+
+    # Return a Python file handle
     try:
       f = posix.fdopen(new_fd, mode)  # Might raise IOError
     except IOError as e:
       raise OSError(*e.args)  # Consistently raise OSError
     return f
 
-  def _PushDup(self, fd1, fd2):
-    # type: (int, int) -> bool
-    """Save fd2, and dup fd1 onto fd2.
+  def _WriteFdToMem(self, fd_name, fd):
+    # type: (str, int) -> None
+    if self.mem:
+      self.mem.SetVar(lvalue.Named(fd_name), value.Str(str(fd)), scope_e.Dynamic)
 
-    Mutates self.cur_frame.saved.
+  def _ReadFdFromMem(self, fd_name):
+    # type: (str) -> int
+    val = self.mem.GetVar(fd_name)
+    if val.tag_() == value_e.Str:
+      try:
+        return int(cast(value__Str, val).s)
+      except ValueError:
+        return NO_FD
+    return NO_FD
 
-    Returns:
-      success Bool
-    """
-    new_fd = self._GetFreeDescriptor()
-    #log('---- _PushDup %s %s', fd1, fd2)
+  def _PushSave(self, fd):
+    # type: (int) -> bool
+    """Save fd to a new location and remember to restore it later."""
+    #log('---- _PushSave %s', fd)
     need_restore = True
     try:
-      fcntl.fcntl(fd2, fcntl.F_DUPFD, new_fd)
+      new_fd = fcntl.fcntl(fd, fcntl.F_DUPFD, _SHELL_MIN_FD)
     except IOError as e:
       # Example program that causes this error: exec 4>&1.  Descriptor 4 isn't
       # open.
       # This seems to be ignored in dash too in savefd()?
       if e.errno == errno.EBADF:
-        #log('ERROR %s', e)
+        #log('ERROR fd %d: %s', fd, e)
         need_restore = False
       else:
         raise
     else:
-      posix.close(fd2)
+      posix.close(fd)
       fcntl.fcntl(new_fd, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
 
-    #log('==== dup %s %s\n' % (fd1, fd2))
-    try:
-      posix.dup2(fd1, fd2)
-    except OSError as e:
-      # bash/dash give this error too, e.g. for 'echo hi 1>&3'
-      self.errfmt.Print('%d: %s', fd1, posix.strerror(e.errno))
-
-      # Restore and return error
-      posix.dup2(new_fd, fd2)
-      posix.close(new_fd)
-      # Undo it
-      return False
-
+    #util.ShowFdState()
     if need_restore:
-      self.cur_frame.saved.append((new_fd, fd2))
+      self.cur_frame.saved.append((new_fd, fd, True))
+    else:
+      # if we got EBADF, we still need to close the original on Pop()
+      self._PushClose(fd)
+      #pass
+
+    return need_restore
+
+  def _PushDup(self, fd1, loc):
+    # type: (int, redir_loc_t) -> int
+    """Save fd2 in a higher range, and dup fd1 onto fd2.
+
+    Returns whether F_DUPFD/dup2 succeeded, and the new descriptor.
+    """
+    UP_loc = loc
+    if loc.tag_() == redir_loc_e.VarName:
+      fd2_name = cast(redir_loc__VarName, UP_loc).name
+      try:
+        # F_DUPFD: GREATER than range
+        new_fd = fcntl.fcntl(fd1, fcntl.F_DUPFD, _SHELL_MIN_FD)  # type: int
+      except IOError as e:
+        if e.errno == errno.EBADF:
+          self.errfmt.Print('%d: %s', fd1, posix.strerror(e.errno))
+          return NO_FD
+        else:
+          raise  # this redirect failed
+
+      self._WriteFdToMem(fd2_name, new_fd)
+
+    elif loc.tag_() == redir_loc_e.Fd:
+      fd2 = cast(redir_loc__Fd, UP_loc).fd
+
+      if fd1 == fd2:
+        # The user could have asked for it to be open on descrptor 3, but open()
+        # already returned 3, e.g. echo 3>out.txt
+        return NO_FD
+
+      need_restore = self._PushSave(fd2)
+
+      #log('==== dup2 %s %s\n' % (fd1, fd2))
+      try:
+        posix.dup2(fd1, fd2)
+      except OSError as e:
+        # bash/dash give this error too, e.g. for 'echo hi 1>&3'
+        self.errfmt.Print('%d: %s', fd1, posix.strerror(e.errno))
+
+        # Restore and return error
+        if need_restore:
+          new_fd, fd2, _ = self.cur_frame.saved.pop()
+          posix.dup2(new_fd, fd2)
+          posix.close(new_fd)
+
+        raise  # this redirect failed
+
+      new_fd = fd2
+
+    else:
+      raise AssertionError()
+
+    return new_fd
+
+  def _PushCloseFd(self, loc):
+    # type: (redir_loc_t) -> bool
+    """For 2>&-"""
+    # exec {fd}>&- means close the named descriptor
+
+    UP_loc = loc
+    if loc.tag_() == redir_loc_e.VarName:
+      fd_name = cast(redir_loc__VarName, UP_loc).name
+      fd = self._ReadFdFromMem(fd_name)
+      if fd == NO_FD:
+        return False
+
+    elif loc.tag_() == redir_loc_e.Fd:
+      fd = cast(redir_loc__Fd, UP_loc).fd
+      self._PushSave(fd)
+
+    else:
+      raise AssertionError()
+
     return True
 
   def _PushClose(self, fd):
     # type: (int) -> None
-    self.cur_frame.need_close.append(fd)
+    self.cur_frame.saved.append((NO_FD, fd, False))
 
   def _PushWait(self, proc, waiter):
     # type: (Process, Waiter) -> None
     self.cur_frame.need_wait.append((proc, waiter))
 
   def _ApplyRedirect(self, r, waiter):
-    # type: (redirect_t, Waiter) -> bool
-    ok = True
+    # type: (redirect, Waiter) -> None
+    arg = r.arg
+    UP_arg = arg
+    with tagswitch(arg) as case:
 
-    UP_r = r
-    with tagswitch(r) as case:
-
-      if case(redirect_e.Path):
-        r = cast(redirect__Path, UP_r)
+      if case(redirect_arg_e.Path):
+        arg = cast(redirect_arg__Path, UP_arg)
 
         if r.op_id in (Id.Redir_Great, Id.Redir_AndGreat):  # >   &>
           # NOTE: This is different than >| because it respects noclobber, but
@@ -251,74 +329,81 @@ class FdState(object):
           mode = posix.O_CREAT | posix.O_WRONLY | posix.O_APPEND
         elif r.op_id == Id.Redir_Less:  # <
           mode = posix.O_RDONLY
+        elif r.op_id == Id.Redir_LessGreat:  # <>
+          mode = posix.O_CREAT | posix.O_RDWR
         else:
           raise NotImplementedError(r.op_id)
 
         # NOTE: 0666 is affected by umask, all shells use it.
         try:
-          target_fd = posix.open(r.filename, mode, 0o666)
+          open_fd = posix.open(arg.filename, mode, 0o666)
         except OSError as e:
           self.errfmt.Print(
-              "Can't open %r: %s", r.filename, posix.strerror(e.errno),
+              "Can't open %r: %s", arg.filename, posix.strerror(e.errno),
               span_id=r.op_spid)
-          return False
+          raise  # redirect failed
 
-        # Apply redirect
-        if not self._PushDup(target_fd, r.fd):
-          ok = False
+        new_fd = self._PushDup(open_fd, r.loc)
+        if new_fd != NO_FD:
+          posix.close(open_fd)
 
-        # Now handle the extra redirects for aliases &> and &>>.
+        # Now handle &> and &>> and their variants.  These pairs are the same:
         #
-        # We can rewrite
         #   stdout_stderr.py &> out-err.txt
-        # as
         #   stdout_stderr.py > out-err.txt 2>&1
         #
-        # And rewrite
         #   stdout_stderr.py 3&> out-err.txt
-        # as
         #   stdout_stderr.py 3> out-err.txt 2>&3
-        if ok:
-          if r.op_id == Id.Redir_AndGreat:
-            if not self._PushDup(r.fd, 2):
-              ok = False
-          elif r.op_id == Id.Redir_AndDGreat:
-            if not self._PushDup(r.fd, 2):
-              ok = False
+        #
+        # Ditto for {fd}> and {fd}&>
 
-        posix.close(target_fd)  # We already made a copy of it.
-        # I don't think we need to close(0) because it will be restored from its
-        # saved position (10), which closes it.
-        #self._PushClose(r.fd)
+        if r.op_id in (Id.Redir_AndGreat, Id.Redir_AndDGreat):
+          self._PushDup(new_fd, redir_loc.Fd(2))
 
-      elif case(redirect_e.FileDesc):  # e.g. echo hi 1>&2
-        r = cast(redirect__FileDesc, UP_r)
+      elif case(redirect_arg_e.CopyFd):  # e.g. echo hi 1>&2
+        arg = cast(redirect_arg__CopyFd, UP_arg)
 
         if r.op_id == Id.Redir_GreatAnd:  # 1>&2
-          if not self._PushDup(r.target_fd, r.fd):
-            ok = False
+          self._PushDup(arg.target_fd, r.loc)
+
         elif r.op_id == Id.Redir_LessAnd:  # 0<&5
           # The only difference between >& and <& is the default file
           # descriptor argument.
-          if not self._PushDup(r.target_fd, r.fd):
-            ok = False
+          self._PushDup(arg.target_fd, r.loc)
+
         else:
           raise NotImplementedError()
 
-      elif case(redirect_e.HereDoc):
-        r = cast(redirect__HereDoc, UP_r)
+      elif case(redirect_arg_e.MoveFd):  # e.g. echo hi 5>&6-
+        arg = cast(redirect_arg__MoveFd, UP_arg)
+        new_fd = self._PushDup(arg.target_fd, r.loc)
+        if new_fd != NO_FD:
+          posix.close(arg.target_fd)
+
+          UP_loc = r.loc
+          if r.loc.tag_() == redir_loc_e.Fd:
+            fd = cast(redir_loc__Fd, UP_loc).fd
+          else:
+            fd = NO_FD
+
+          self.cur_frame.saved.append((new_fd, fd, False))
+
+      elif case(redirect_arg_e.CloseFd):  # e.g. echo hi 5>&-
+        self._PushCloseFd(r.loc)
+
+      elif case(redirect_arg_e.HereDoc):
+        arg = cast(redirect_arg__HereDoc, UP_arg)
 
         # NOTE: Do these descriptors have to be moved out of the range 0-9?
         read_fd, write_fd = posix.pipe()
 
-        if not self._PushDup(read_fd, r.fd):  # stdin is now the pipe
-          ok = False
+        self._PushDup(read_fd, r.loc)  # stdin is now the pipe
 
         # We can't close like we do in the filename case above?  The writer can
         # get a "broken pipe".
         self._PushClose(read_fd)
 
-        thunk = _HereDocWriterThunk(write_fd, r.body)
+        thunk = _HereDocWriterThunk(write_fd, arg.body)
 
         # TODO: Use PIPE_SIZE to save a process in the case of small here docs,
         # which are the common case.  (dash does this.)
@@ -338,39 +423,25 @@ class FdState(object):
           posix.close(write_fd)
 
         else:
-          posix.write(write_fd, r.body)
+          posix.write(write_fd, arg.body)
           posix.close(write_fd)
 
-    return ok
-
   def Push(self, redirects, waiter):
-    # type: (List[redirect_t], Waiter) -> bool
+    # type: (List[redirect], Waiter) -> bool
+    """Apply a group of redirects and remember to undo them."""
+
     #log('> fd_state.Push %s', redirects)
     new_frame = _FdFrame()
     self.stack.append(new_frame)
     self.cur_frame = new_frame
 
     for r in redirects:
-      # TODO: Could we use inheritance to make this cheaper?
-      UP_r = r
-      with tagswitch(r) as case:
-        if case(redirect_e.Path):
-          r = cast(redirect__Path, UP_r)
-          op_spid = r.op_spid
-        elif case(redirect_e.FileDesc):
-          r = cast(redirect__FileDesc, UP_r)
-          op_spid = r.op_spid
-        elif case(redirect_e.HereDoc):
-          r = cast(redirect__HereDoc, UP_r)
-          op_spid = r.op_spid
-        else:
-          raise AssertionError()
-
       #log('apply %s', r)
-      self.errfmt.PushLocation(op_spid)
+      self.errfmt.PushLocation(r.op_spid)
       try:
-        if not self._ApplyRedirect(r, waiter):
-          return False  # for bad descriptor
+        self._ApplyRedirect(r, waiter)
+      except (IOError, OSError) as e:
+        return False  # for bad descriptor, etc.
       finally:
         self.errfmt.PopLocation()
     #log('done applying %d redirects', len(redirects))
@@ -388,38 +459,39 @@ class FdState(object):
     self.stack.append(new_frame)
     self.cur_frame = new_frame
 
-    return self._PushDup(r, 0)
-
-  def MakePermanent(self):
-    # type: () -> None
-    self.cur_frame.Forget()
+    self._PushDup(r, redir_loc.Fd(0))
+    return True
 
   def Pop(self):
     # type: () -> None
     frame = self.stack.pop()
     #log('< Pop %s', frame)
-    for saved, orig in reversed(frame.saved):
-      try:
-        posix.dup2(saved, orig)
-      except OSError as e:
-        log('dup2(%d, %d) error: %s', saved, orig, e)
-        #log('fd state:')
-        #posix.system('ls -l /proc/%s/fd' % posix.getpid())
-        raise
-      posix.close(saved)
-      #log('dup2 %s %s', saved, orig)
-
-    for fd in frame.need_close:
-      #log('Close %d', fd)
-      try:
-        posix.close(fd)
-      except OSError as e:
-        log('Error closing descriptor %d: %s', fd, e)
-        raise
+    for saved, orig, _ in reversed(frame.saved):
+      if saved == NO_FD:
+        #log('Close %d', orig)
+        try:
+          posix.close(orig)
+        except OSError as e:
+          log('Error closing descriptor %d: %s', orig, e)
+          raise
+      else:
+        try:
+          posix.dup2(saved, orig)
+        except OSError as e:
+          log('dup2(%d, %d) error: %s', saved, orig, e)
+          #log('fd state:')
+          #posix.system('ls -l /proc/%s/fd' % posix.getpid())
+          raise
+        posix.close(saved)
+        #log('dup2 %s %s', saved, orig)
 
     # Wait for here doc processes to finish.
     for proc, waiter in frame.need_wait:
       unused_status = proc.Wait(waiter)
+
+  def MakePermanent(self):
+    # type: () -> None
+    self.cur_frame.Forget()
 
 
 class ChildStateChange(object):
@@ -471,7 +543,6 @@ class ExternalProgram(object):
   def __init__(self,
                hijack_shebang,  # type: str
                fd_state,  # type: FdState
-               search_path,  # type: SearchPath
                errfmt,  # type: ErrorFormatter
                debug_f,  # type: NullDebugFile
                ):
@@ -483,7 +554,6 @@ class ExternalProgram(object):
     """
     self.hijack_shebang = hijack_shebang
     self.fd_state = fd_state
-    self.search_path = search_path
     self.errfmt = errfmt
     self.debug_f = debug_f
 
@@ -597,7 +667,8 @@ class ExternalThunk(Thunk):
     # bash displays        sleep $n & (code)
     # but OSH displays     sleep 1 &  (argv array)
     # We could switch the former but I'm not sure it's necessary.
-    return '[process] %s' % ' '.join(pretty.String(a) for a in self.cmd_val.argv)
+    tmp = [qsn.maybe_shell_encode(a) for a in self.cmd_val.argv]
+    return '[process] %s' % ' '.join(tmp)
 
   def Run(self):
     # type: () -> None
@@ -610,9 +681,9 @@ class ExternalThunk(Thunk):
 class SubProgramThunk(Thunk):
   """A subprogram that can be executed in another process."""
 
-  def __init__(self, ex, node, inherit_errexit=True):
-    # type: (Executor, command_t, bool) -> None
-    self.ex = ex
+  def __init__(self, cmd_ev, node, inherit_errexit=True):
+    # type: (CommandEvaluator, command_t, bool) -> None
+    self.cmd_ev = cmd_ev
     self.node = node
     self.inherit_errexit = inherit_errexit  # for bash errexit compatibility
 
@@ -628,11 +699,12 @@ class SubProgramThunk(Thunk):
 
     # NOTE: may NOT return due to exec().
     if not self.inherit_errexit:
-      self.ex.mutable_opts.errexit.Disable()
+      self.cmd_ev.mutable_opts.errexit.Disable()
 
     try:
-      self.ex.ExecuteAndCatch(self.node, fork_external=False)
-      status = self.ex.LastStatus()
+      # optimize to eliminate redundant subshells like ( echo hi ) | wc -l etc.
+      self.cmd_ev.ExecuteAndCatch(self.node, optimize=True)
+      status = self.cmd_ev.LastStatus()
       # NOTE: We ignore the is_fatal return value.  The user should set -o
       # errexit so failures in subprocesses cause failures in the parent.
     except util.UserExit as e:
@@ -874,7 +946,7 @@ class Pipeline(Job):
     self.status = -1  # for 'wait' jobs
 
     # Optional for foregroud
-    self.last_thunk = None  # type: Tuple[Executor, command_t]
+    self.last_thunk = None  # type: Tuple[CommandEvaluator, command_t]
     self.last_pipe = None  # type: Tuple[int, int]
 
   def __repr__(self):
@@ -900,7 +972,7 @@ class Pipeline(Job):
     self.procs.append(p)
 
   def AddLast(self, thunk):
-    # type: (Tuple[Executor, command_t]) -> None
+    # type: (Tuple[CommandEvaluator, command_t]) -> None
     """Append the last noden to the pipeline.
 
     This is run in the CURRENT process.  It is OPTIONAL, because pipelines in
@@ -985,15 +1057,20 @@ class Pipeline(Job):
     # ls | wc -l
     # echo foo | read line  # no need to fork
 
-    ex, node = self.last_thunk
+    cmd_ev, node = self.last_thunk
 
     #log('thunk %s', self.last_thunk)
     if self.last_pipe is not None:
       r, w = self.last_pipe  # set in AddLast()
       posix.close(w)  # we will not write here
       fd_state.PushStdinFromPipe(r)
+
+      # TODO: determine fork_external here, so we can go BEYOND lastpipe.  Not
+      # only do we run builtins in the same process.  External processes will
+      # exec() rather than fork/exec().
+
       try:
-        ex.ExecuteAndCatch(node)
+        cmd_ev.ExecuteAndCatch(node)
       finally:
         fd_state.Pop()
       # We won't read anymore.  If we don't do this, then 'cat' in 'cat
@@ -1002,11 +1079,11 @@ class Pipeline(Job):
 
     else:
       if self.procs:
-        ex.ExecuteAndCatch(node)  # Background pipeline without last_pipe
+        cmd_ev.ExecuteAndCatch(node)  # Background pipeline without last_pipe
       else:
-        ex._Execute(node)  # singleton foreground pipeline, e.g. '! func'
+        cmd_ev._Execute(node)  # singleton foreground pipeline, e.g. '! func'
 
-    self.pipe_status[-1] = ex.LastStatus()
+    self.pipe_status[-1] = cmd_ev.LastStatus()
     #log('pipestatus before all have finished = %s', self.pipe_status)
 
     if self.procs:
@@ -1183,7 +1260,7 @@ class JobState(object):
 class Waiter(object):
   """A capability to wait for processes.
 
-  This must be a singleton (and is because Executor is a singleton).
+  This must be a singleton (and is because CommandEvaluator is a singleton).
 
   Invariants:
   - Every child process is registered once

@@ -4,7 +4,7 @@ module runtime
 {
   -- Evaluating SimpleCommand results in either an argv array or an assignment.
   -- in 'local foo', rval is None
-  assign_arg = (lvalue lval, value? rval, int spid)
+  assign_arg = (string var_name, value? rval, int spid)
 
   -- ASDL issue: I need to import the 'command' type from frontend/syntax.asdl!
   -- and 'builtin' from synthetic option_asdl
@@ -47,6 +47,12 @@ module runtime
     -- what about Proc or Module here?  are they first class?
     -- then you can reflect on them?  Get name and docstring?
 
+    -- Iterator type:
+    --   for (i in 1..=n) { echo $i }
+    --   for (k in keys(d)) { echo $k }
+    --   for (item in myarray) { echo $item }
+    -- What about pipelines?  make-pipeline, add-process, etc.
+
     -- A Python-style object.  'any' is not currently type checked.
     -- invariant for 'proc' stack:
     -- * s bool, int, float, (NOT str), or...
@@ -54,6 +60,10 @@ module runtime
     -- * heterogeneous List (NOT dict)
     -- * or a user-defined type
   | Obj(any obj)
+
+  -- What is valid in arrays or assoc arrays a[i] or A[i] in shell.
+  -- Used for ${a[i]=x}.  TODO: also use for lvalue/place.
+  a_index = Str(string s) | Int(int i)
 
   -- A cell is a wrapper for a value.  16 bytes in C++.
   -- TODO: add spid for last-assigned location
@@ -77,12 +87,16 @@ module runtime
   | ObjAttr(any obj, string attr)
   attributes (int* spids)
 
+  redirect_arg =
+    Path(string filename)
+  | CopyFd(int target_fd)
+  | MoveFd(int target_fd)  -- 3>&1-
+  | CloseFd
+  | HereDoc(string body)  -- call this String and combine with Path?
+
   -- evaluated version of syntax.redir
-  redirect = 
-    Path(id op_id, int fd, string filename, int op_spid)
-  | FileDesc(id op_id, int fd, int target_fd, int op_spid)
-    -- here doc or here word
-  | HereDoc(int fd, string body, int op_spid)
+  -- TODO: loc should be redir_loc
+  redirect = (id op_id, int op_spid, any loc, redirect_arg arg)
 
   job_status =
     Proc(int code)
@@ -97,11 +111,6 @@ module runtime
   -- whitespace; DE_Gray is for other IFS chars; Black is for significant
   -- characters.  Sentinel is the end of the string.
   char_kind = DE_White | DE_Gray | Black | Backslash | Sentinel
-
-  -- word_eval.py: SliceParts is for ${a-} and ${a+}, Error is for ${a?}, and
-  -- SliceAndAssign is for ${a=}.
-  -- TODO: Could be cleaner if Error and SpliceAndAssign have part_vals
-  effect = SpliceParts | Error | SpliceAndAssign | NoOp
 
   -- core/process.py
   -- A Job is a Process or Pipeline.

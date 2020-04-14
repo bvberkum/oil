@@ -56,6 +56,7 @@ from core import alloc
 from core import comp_ui
 from core import dev
 from core import error
+from core import executor
 from core import completion
 from core import main_loop
 from core import meta
@@ -79,14 +80,16 @@ from oil_lang import expr_eval
 from oil_lang import builtin_oil
 from oil_lang import builtin_funcs
 
-from osh import builtin_misc
 from osh import builtin_assign
 from osh import builtin_bracket
 from osh import builtin_comp
+from osh import builtin_meta
+from osh import builtin_misc
+from osh import builtin_lib
 from osh import builtin_printf
 from osh import builtin_process
 from osh import builtin_pure
-from osh import cmd_exec
+from osh import cmd_eval
 from osh import glob_
 from osh import history
 from osh import prompt
@@ -158,7 +161,7 @@ def _MakeBuiltinArgv(argv):
   return cmd_value.Argv(argv, [runtime.NO_SPID] * len(argv))
 
 
-def _InitDefaultCompletions(ex, complete_builtin, comp_lookup):
+def _InitDefaultCompletions(cmd_ev, complete_builtin, comp_lookup):
   # register builtins and words
   complete_builtin.Run(_MakeBuiltinArgv(['-E', '-A', 'command']))
   # register path completion
@@ -224,11 +227,11 @@ def _InitReadline(readline_mod, history_filename, root_comp, display, debug_f):
   )
 
 
-def _ShowVersion():
-  pyutil.ShowAppVersion('Oil')
+def _ShowVersion(version_str):
+  pyutil.ShowAppVersion('Oil', version_str)
 
 
-def SourceStartupFile(rc_path, lang, parse_ctx, ex):
+def SourceStartupFile(rc_path, lang, parse_ctx, cmd_ev):
   # Right now this is called when the shell is interactive.  (Maybe it should
   # be called on login_shel too.)
   #
@@ -251,7 +254,7 @@ def SourceStartupFile(rc_path, lang, parse_ctx, ex):
       arena.PushSource(source.SourcedFile(rc_path))
       try:
         # TODO: don't ignore status, e.g. status == 2 when there's a parse error.
-        status = main_loop.Batch(ex, rc_c_parser, arena)
+        status = main_loop.Batch(cmd_ev, rc_c_parser, arena)
       finally:
         arena.PopSource()
   except IOError as e:
@@ -320,9 +323,10 @@ def ShellMain(lang, argv0, argv, login_shell):
   if opts.help:
     builtin_misc.Help(['%s-usage' % lang], loader)
     return 0
+  version_str = pyutil.GetVersion()
   if opts.version:
     # OSH version is the only binary in Oil right now, so it's all one version.
-    _ShowVersion()
+    _ShowVersion(version_str)
     return 0
 
   no_str = None  # type: str
@@ -345,13 +349,13 @@ def ShellMain(lang, argv0, argv, login_shell):
   errfmt = ui.ErrorFormatter(arena)
 
   mem = state.Mem(dollar0, argv[arg_r.i + 1:], arena, debug_stack)
-  state.InitMem(mem, posix.environ)
+  state.InitMem(mem, posix.environ, version_str)
   builtin_funcs.Init(mem)
 
   procs = {}
 
   job_state = process.JobState()
-  fd_state = process.FdState(errfmt, job_state)
+  fd_state = process.FdState(errfmt, job_state, mem)
 
   opt_hook = ShellOptHook(line_input)
   parse_opts, exec_opts, mutable_opts = state.MakeOpts(mem, opt_hook)
@@ -396,22 +400,20 @@ def ShellMain(lang, argv0, argv, login_shell):
   hist_ctx.Init_Trail(trail2)
 
   # Deps helps manages dependencies.  These dependencies are circular:
-  # - ex and word_ev, arith_ev -- for command sub, arith sub
+  # - cmd_ev and word_ev, arith_ev -- for command sub, arith sub
   # - arith_ev and word_ev -- for $(( ${a} )) and $x$(( 1 )) 
-  # - ex and builtins (which execute code, like eval)
+  # - cmd_ev and builtins (which execute code, like eval)
   # - prompt_ev needs word_ev for $PS1, which needs prompt_ev for @P
-  exec_deps = cmd_exec.Deps()
-  exec_deps.mutable_opts = mutable_opts
+  cmd_deps = cmd_eval.Deps()
+  cmd_deps.mutable_opts = mutable_opts
 
-  # TODO: In general, exec_deps are shared between the mutually recursive
+  # TODO: In general, cmd_deps are shared between the mutually recursive
   # evaluators.  Some of the four below are only shared between a builtin and
-  # the Executor, so we could put them somewhere else.
-  exec_deps.traps = {}
-  exec_deps.trap_nodes = []  # TODO: Clear on fork() to avoid duplicates
+  # the CommandEvaluator, so we could put them somewhere else.
+  cmd_deps.traps = {}
+  cmd_deps.trap_nodes = []  # TODO: Clear on fork() to avoid duplicates
 
-  exec_deps.job_state = job_state
-  exec_deps.waiter = process.Waiter(job_state, exec_opts)
-  exec_deps.errfmt = errfmt
+  waiter = process.Waiter(job_state, exec_opts)
 
   my_pid = posix.getpid()
 
@@ -434,7 +436,7 @@ def ShellMain(lang, argv0, argv, login_shell):
   else:
     debug_f = util.NullDebugFile()
 
-  exec_deps.debug_f = debug_f
+  cmd_deps.debug_f = debug_f
 
   # Not using datetime for dependency reasons.  TODO: maybe show the date at
   # the beginning of the log, and then only show time afterward?  To save
@@ -446,10 +448,8 @@ def ShellMain(lang, argv0, argv, login_shell):
     debug_f.log('Writing logs to %r', debug_path)
 
   interp = posix.environ.get('OSH_HIJACK_SHEBANG', '')
-  exec_deps.search_path = state.SearchPath(mem)
-  exec_deps.ext_prog = process.ExternalProgram(interp, fd_state,
-                                               exec_deps.search_path,
-                                               errfmt, debug_f)
+  search_path = state.SearchPath(mem)
+  ext_prog = process.ExternalProgram(interp, fd_state, errfmt, debug_f)
 
   splitter = split.SplitContext(mem)
 
@@ -467,13 +467,12 @@ def ShellMain(lang, argv0, argv, login_shell):
   # This could just be OSH_DEBUG_STREAMS='debug crash' ?  That might be
   # stuffing too much into one, since a .json crash dump isn't a stream.
   crash_dump_dir = posix.environ.get('OSH_CRASH_DUMP_DIR', '')
-  exec_deps.dumper = dev.CrashDumper(crash_dump_dir)
+  cmd_deps.dumper = dev.CrashDumper(crash_dump_dir)
 
   if opts.xtrace_to_debug_file:
     trace_f = debug_f
   else:
     trace_f = util.DebugFile(sys.stderr)
-  exec_deps.trace_f = trace_f
 
   comp_lookup = completion.Lookup()
 
@@ -485,8 +484,19 @@ def ShellMain(lang, argv0, argv, login_shell):
   dir_stack = state.DirStack()
 
   new_var = builtin_assign.NewVar(mem, procs, errfmt)
+  assign_builtins = {
+      # ShAssignment (which are pure)
+      builtin_i.declare: new_var,
+      builtin_i.typeset: new_var,
+      builtin_i.local: new_var,
 
-  builtins = {  # Lookup
+      builtin_i.export_: builtin_assign.Export(mem, errfmt),
+      builtin_i.readonly: builtin_assign.Readonly(mem, errfmt),
+  }
+
+  true_ = builtin_pure.Boolean(0)
+
+  builtins = {
       builtin_i.echo: builtin_pure.Echo(exec_opts),
       builtin_i.printf: builtin_printf.Printf(mem, parse_ctx, errfmt),
 
@@ -500,23 +510,19 @@ def ShellMain(lang, argv0, argv, login_shell):
       builtin_i.help: builtin_misc.Help(loader, errfmt),
       builtin_i.history: builtin_misc.History(line_input),
 
+      builtin_i.cat: builtin_misc.Cat(),  # for $(<file)
+
       # Completion (more added below)
       builtin_i.compopt: builtin_comp.CompOpt(compopt_state, errfmt),
       builtin_i.compadjust: builtin_comp.CompAdjust(mem),
+
+      # interactive
+      builtin_i.bind: builtin_lib.Bind(line_input, errfmt),
 
       # test / [ differ by need_right_bracket
       builtin_i.test: builtin_bracket.Test(False, exec_opts, mem, errfmt),
       builtin_i.bracket: builtin_bracket.Test(True, exec_opts, mem, errfmt),
 
-      # ShAssignment (which are pure)
-      builtin_i.declare: new_var,
-      builtin_i.typeset: new_var,
-      builtin_i.local: new_var,
-
-      builtin_i.export_: builtin_assign.Export(mem, errfmt),
-      builtin_i.readonly: builtin_assign.Readonly(mem, errfmt),
-
-      builtin_i.unset: builtin_assign.Unset(mem, procs, errfmt),
       builtin_i.shift: builtin_assign.Shift(mem),
 
       # Pure
@@ -526,20 +532,23 @@ def ShellMain(lang, argv0, argv, login_shell):
       builtin_i.alias: builtin_pure.Alias(aliases, errfmt),
       builtin_i.unalias: builtin_pure.UnAlias(aliases, errfmt),
 
-      builtin_i.type: builtin_pure.Type(procs, aliases, exec_deps.search_path),
-      builtin_i.hash: builtin_pure.Hash(exec_deps.search_path),
+      builtin_i.type: builtin_pure.Type(procs, aliases, search_path),
+      builtin_i.hash: builtin_pure.Hash(search_path),
       builtin_i.getopts: builtin_pure.GetOpts(mem, errfmt),
 
-      builtin_i.colon: builtin_pure.Boolean(0),  # a "special" builtin 
-      builtin_i.true_: builtin_pure.Boolean(0),
+      builtin_i.colon: true_,  # a "special" builtin 
+      builtin_i.true_: true_,
       builtin_i.false_: builtin_pure.Boolean(1),
 
       # Process
-      builtin_i.wait: builtin_process.Wait(exec_deps.waiter,
-                                           exec_deps.job_state, mem, errfmt),
-      builtin_i.jobs: builtin_process.Jobs(exec_deps.job_state),
-      builtin_i.fg: builtin_process.Fg(exec_deps.job_state, exec_deps.waiter),
-      builtin_i.bg: builtin_process.Bg(exec_deps.job_state),
+      builtin_i.exec_: builtin_process.Exec(mem, ext_prog,
+                                            fd_state, search_path,
+                                            errfmt),
+      builtin_i.wait: builtin_process.Wait(waiter,
+                                           job_state, mem, errfmt),
+      builtin_i.jobs: builtin_process.Jobs(job_state),
+      builtin_i.fg: builtin_process.Fg(job_state, waiter),
+      builtin_i.bg: builtin_process.Bg(job_state),
       builtin_i.umask: builtin_process.Umask(),
 
       # Oil
@@ -554,35 +563,58 @@ def ShellMain(lang, argv0, argv, login_shell):
       builtin_i.opts: builtin_oil.Opts(mem, errfmt),
   }
 
-  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, errfmt)
-  bool_ev = sh_expr_eval.BoolEvaluator(mem, exec_opts, errfmt)
+  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, parse_ctx, errfmt)
+  bool_ev = sh_expr_eval.BoolEvaluator(mem, exec_opts, parse_ctx, errfmt)
   expr_ev = expr_eval.OilEvaluator(mem, procs, errfmt)
   word_ev = word_eval.NormalWordEvaluator(mem, exec_opts, splitter, errfmt)
-  ex = cmd_exec.Executor(mem, fd_state, procs, builtins, exec_opts,
-                         parse_ctx, exec_deps)
+  cmd_ev = cmd_eval.CommandEvaluator(mem, exec_opts, errfmt, procs,
+                                     assign_builtins, arena, cmd_deps)
+
+  shell_ex = executor.ShellExecutor(
+      mem, exec_opts, mutable_opts, procs, builtins, search_path,
+      ext_prog, waiter, job_state, fd_state, errfmt)
+
   # PromptEvaluator rendering is needed in non-interactive shells for @P.
   prompt_ev = prompt.Evaluator(lang, parse_ctx, mem)
   tracer = dev.Tracer(parse_ctx, exec_opts, mutable_opts, mem, word_ev, trace_f)
 
   # Wire up circular dependencies.
-  vm.InitCircularDeps(arith_ev, bool_ev, expr_ev, word_ev, ex, prompt_ev, tracer)
+  vm.InitCircularDeps(arith_ev, bool_ev, expr_ev, word_ev, cmd_ev, shell_ex,
+                      prompt_ev, tracer)
 
-  spec_builder = builtin_comp.SpecBuilder(ex, parse_ctx, word_ev, splitter,
+  #
+  # Add builtins that depend on various evaluators
+  #
+
+  builtins[builtin_i.unset] = builtin_assign.Unset(mem, exec_opts, procs,
+                                                   parse_ctx, arith_ev, errfmt)
+  builtins[builtin_i.eval] = builtin_meta.Eval(parse_ctx, exec_opts, cmd_ev)
+
+  source_builtin = builtin_meta.Source(
+      parse_ctx, search_path, cmd_ev, fd_state, errfmt)
+  builtins[builtin_i.source] = source_builtin
+  builtins[builtin_i.dot] = source_builtin
+
+  builtins[builtin_i.builtin] = builtin_meta.Builtin(shell_ex, errfmt)
+  builtins[builtin_i.command] = builtin_meta.Command(shell_ex, procs, aliases,
+                                                      search_path)
+
+  spec_builder = builtin_comp.SpecBuilder(cmd_ev, parse_ctx, word_ev, splitter,
                                           comp_lookup)
-
-  # Add some builtins that depend on the executor!
   complete_builtin = builtin_comp.Complete(spec_builder, comp_lookup)
   builtins[builtin_i.complete] = complete_builtin
   builtins[builtin_i.compgen] = builtin_comp.CompGen(spec_builder)
-  builtins[builtin_i.cd] = builtin_misc.Cd(mem, dir_stack, ex, errfmt)
-  builtins[builtin_i.json] = builtin_oil.Json(mem, ex, errfmt)
+
+  # These builtins take blocks, and thus need cmd_ev.
+  builtins[builtin_i.cd] = builtin_misc.Cd(mem, dir_stack, cmd_ev, errfmt)
+  builtins[builtin_i.json] = builtin_oil.Json(mem, cmd_ev, errfmt)
 
   sig_state = process.SignalState()
   sig_state.InitShell()
 
-  builtins[builtin_i.trap] = builtin_process.Trap(sig_state, exec_deps.traps,
-                                                  exec_deps.trap_nodes, ex,
-                                                  errfmt)
+  builtins[builtin_i.trap] = builtin_process.Trap(sig_state, cmd_deps.traps,
+                                                  cmd_deps.trap_nodes,
+                                                  parse_ctx, errfmt)
 
   # History evaluation is a no-op if line_input is None.
   hist_ev = history.Evaluator(line_input, hist_ctx, debug_f)
@@ -625,6 +657,9 @@ def ShellMain(lang, argv0, argv, login_shell):
   c_parser = parse_ctx.MakeOshParser(line_reader)
 
   if exec_opts.interactive():
+    # bash: 'set -o emacs' is the default only in the interactive shell
+    mutable_opts.set_emacs()
+
     # Calculate ~/.config/oil/oshrc or oilrc
     # Use ~/.config/oil to avoid cluttering the user's home directory.  Some
     # users may want to ln -s ~/.config/oil/oshrc ~/oshrc or ~/.oshrc.
@@ -662,7 +697,7 @@ def ShellMain(lang, argv0, argv, login_shell):
         display = comp_ui.MinimalDisplay(comp_ui_state, prompt_state, debug_f)
 
       _InitReadline(line_input, history_filename, root_comp, display, debug_f)
-      _InitDefaultCompletions(ex, complete_builtin, comp_lookup)
+      _InitDefaultCompletions(cmd_ev, complete_builtin, comp_lookup)
 
     else:  # Without readline module
       display = comp_ui.MinimalDisplay(comp_ui_state, prompt_state, debug_f)
@@ -671,18 +706,18 @@ def ShellMain(lang, argv0, argv, login_shell):
 
     # NOTE: Call this AFTER _InitDefaultCompletions.
     try:
-      SourceStartupFile(rc_path, lang, parse_ctx, ex)
+      SourceStartupFile(rc_path, lang, parse_ctx, cmd_ev)
     except util.UserExit as e:
       return e.status
 
     line_reader.Reset()  # After sourcing startup file, render $PS1
 
-    prompt_plugin = prompt.UserPlugin(mem, parse_ctx, ex)
+    prompt_plugin = prompt.UserPlugin(mem, parse_ctx, cmd_ev)
     try:
-      status = main_loop.Interactive(opts, ex, c_parser, display,
+      status = main_loop.Interactive(opts, cmd_ev, c_parser, display,
                                      prompt_plugin, errfmt)
-      if ex.MaybeRunExitTrap():
-        status = ex.LastStatus()
+      if cmd_ev.MaybeRunExitTrap():
+        status = cmd_ev.LastStatus()
     except util.UserExit as e:
       status = e.status
     return status
@@ -694,9 +729,9 @@ def ShellMain(lang, argv0, argv, login_shell):
 
   _tlog('Execute(node)')
   try:
-    status = main_loop.Batch(ex, c_parser, arena, nodes_out=nodes_out)
-    if ex.MaybeRunExitTrap():
-      status = ex.LastStatus()
+    status = main_loop.Batch(cmd_ev, c_parser, arena, nodes_out=nodes_out, is_main=True)
+    if cmd_ev.MaybeRunExitTrap():
+      status = cmd_ev.LastStatus()
   except util.UserExit as e:
     status = e.status
 
@@ -864,7 +899,8 @@ def AppBundleMain(argv):
       sys.exit(0)
 
     if first_arg in ('-V', '--version'):
-      _ShowVersion()
+      version_str = pyutil.GetVersion()
+      _ShowVersion(version_str)
       sys.exit(0)
 
     main_name = first_arg

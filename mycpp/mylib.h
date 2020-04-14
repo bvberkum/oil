@@ -250,8 +250,15 @@ class Str {
 
   Str* replace(Str* old, Str* new_str);
 
-  int find(Str* s) {
-    assert(0);
+  int find(Str* needle) {
+    assert(needle->len_ == 1);  // Oil's usage
+    char c = needle->data_[0];
+    for (int i = 0; i < len_; ++i) {
+      if (data_[i] == c) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   Str* upper() {
@@ -666,7 +673,9 @@ inline Str* chr(int i) {
 
 inline int ord(Str* s) {
   assert(s->len_ == 1);
-  return s->data_[0];
+  // signed to unsigned conversion, so we don't get values like -127
+  uint8_t c = static_cast<uint8_t>(s->data_[0]);
+  return c;
 }
 
 // https://stackoverflow.com/questions/3919995/determining-sprintf-buffer-size-whats-the-standard/11092994#11092994

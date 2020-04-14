@@ -6,24 +6,7 @@
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 """
-builtins.py - Metadata for all builtins, and some implementations.
-
-Metadata:
-
-- Is used for lookup in cmd_exec.py
-- Should be used for completion
-  - complete names of builtins
-  - complete flags they take
-  - handle aliases : . and source, [ and test
-- Should be reflected in the contents of the 'help' builtin
-
-NOTE: bash has help -d -m -s.  Default is -s, like a man page.
-
-Links on special builtins:
-http://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_14
-
-- syntax errors in special builtins may cause the shell to abort, but NOT for
-  regular builtins?
+builtin_misc.py - Misc builtins.
 """
 from __future__ import print_function
 
@@ -36,6 +19,7 @@ from _devbuild.gen.runtime_asdl import (
 from asdl import runtime
 from core import state
 from core import ui
+from core.util import log
 from frontend import args
 from frontend import arg_def
 from mycpp import mylib
@@ -51,14 +35,16 @@ if mylib.PYTHON:
   except ImportError:
     help_index = None
 
-from typing import Any, IO, TYPE_CHECKING
+from typing import Tuple, Any, Optional, IO, TYPE_CHECKING
 if TYPE_CHECKING:
   from _devbuild.gen.runtime_asdl import value__Str
   from core.pyutil import _FileResourceLoader
   from core.state import Mem, DirStack
   from core.ui import ErrorFormatter
-  from osh.cmd_exec import Executor
+  from osh.cmd_eval import CommandEvaluator
   from osh.split import SplitContext
+
+_ = log
 
 #
 # Abstract base class
@@ -166,23 +152,35 @@ if mylib.PYTHON:
   READ_SPEC.ShortFlag('-r')
   READ_SPEC.ShortFlag('-n', args.Int)
   READ_SPEC.ShortFlag('-a', args.Str)  # name of array to read into
+  READ_SPEC.ShortFlag('-d', args.Str)
 
 
 # sys.stdin.readline() in Python has buffering!  TODO: Rewrite this tight loop
 # in C?  Less garbage probably.
 # NOTE that dash, mksh, and zsh all read a single byte at a time.  It appears
 # to be required by POSIX?  Could try libc getline and make this an option.
-def ReadLineFromStdin():
+
+def ReadLineFromStdin(delim_char):
+  # type: (Optional[str]) -> Tuple[str, bool]
+  """Read a portion of stdin.
+  
+  If delim_char is set, read until that delimiter, but don't include it.
+  If not set, read a line, and include the newline.
+  """
+  eof = False
   chars = []
   while True:
     c = posix.read(0, 1)
     if not c:
+      eof = True
       break
+
+    if c == delim_char:
+      break
+
     chars.append(c)
 
-    if c == '\n':
-      break
-  return ''.join(chars)
+  return ''.join(chars), eof
 
 
 class Read(object):
@@ -194,8 +192,8 @@ class Read(object):
   def Run(self, cmd_val):
     # type: (cmd_value__Argv) -> int
     arg, i = READ_SPEC.ParseCmdVal(cmd_val)
-
     names = cmd_val.argv[i:]
+
     if arg.n is not None:  # read a certain number of bytes
       stdin = sys.stdin.fileno()
       try:
@@ -240,24 +238,30 @@ class Read(object):
     else:
       max_results = len(names)
 
+    if arg.d is not None:
+      if len(arg.d):
+        delim_char = arg.d[0]
+      else:
+        delim_char = '\0'  # -d '' delimits by NUL
+    else:
+      delim_char = '\n'  # read a line
+
     # We have to read more than one line if there is a line continuation (and
     # it's not -r).
-
     parts = []
     join_next = False
+    status = 0
     while True:
-      line = ReadLineFromStdin()
-      #log('LINE %r', line)
-      if not line:  # EOF
-        status = 1
-        break
+      line, eof = ReadLineFromStdin(delim_char)
 
-      if line.endswith('\n'):  # strip trailing newline
-        line = line[:-1]
-        status = 0
-      else:
-        # odd bash behavior: fail even if we can set variables.
+      if eof:
+        # status 1 to terminate loop.  (This is true even though we set
+        # variables).
         status = 1
+
+      #log('LINE %r', line)
+      if len(line) == 0:
+        break
 
       spans = self.splitter.SplitForRead(line, not arg.r)
       done, join_next = _AppendParts(line, spans, max_results, join_next, parts)
@@ -287,11 +291,11 @@ if mylib.PYTHON:
 
 
 class Cd(object):
-  def __init__(self, mem, dir_stack, ex, errfmt):
-    # type: (Mem, DirStack, Executor, ErrorFormatter) -> None
+  def __init__(self, mem, dir_stack, cmd_ev, errfmt):
+    # type: (Mem, DirStack, CommandEvaluator, ErrorFormatter) -> None
     self.mem = mem
     self.dir_stack = dir_stack
-    self.ex = ex  # To run blocks
+    self.cmd_ev = cmd_ev  # To run blocks
     self.errfmt = errfmt
 
   def Run(self, cmd_val):
@@ -355,7 +359,7 @@ class Cd(object):
     if cmd_val.block:
       self.dir_stack.Push(real_dest_dir)
       try:
-        unused = self.ex.EvalBlock(cmd_val.block)
+        unused = self.cmd_ev.EvalBlock(cmd_val.block)
       finally:  # TODO: Change this to a context manager.
         # note: it might be more consistent to use an exception here.
         if not _PopDirStack(self.mem, self.dir_stack, self.errfmt):
@@ -663,4 +667,23 @@ class History(object):
     for i in xrange(start_index, num_items+1):  # 1-based index
       item = readline_mod.get_history_item(i)
       self.f.write('%5d  %s\n' % (i, item))
+    return 0
+
+
+class Cat(object):
+  """Internal implementation detail for $(< file).
+  
+  Maybe expose this as 'builtin cat' ?
+  """
+
+  def __init__(self):
+    pass
+
+  def Run(self, cmd_val):
+    # type: (cmd_value__Argv) -> int
+    while True:
+      chunk = posix.read(0, 4096)
+      if len(chunk) == 0:
+        break
+      sys.stdout.write(chunk)
     return 0

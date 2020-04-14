@@ -148,9 +148,22 @@ EOF
 #       x86_64_musl/   # binaries
 #         linux
 
+sshq() {
+  # Don't need commands module as I said here!
+  # http://www.oilshell.org/blog/2017/01/31.html
+  #
+  # This is Bernstein chaining through ssh.
+
+  ssh $USER@$HOST "$(printf '%q ' "$@")"
+}
+
 remote-rewrite-jobs-index() {
-  ssh $USER@$HOST \
-    toil-web/services/toil-web.sh rewrite-jobs-index
+  sshq toil-web/services/toil-web.sh rewrite-jobs-index
+}
+
+remote-cleanup-jobs-index() {
+  # clean it up for real!
+  sshq toil-web/services/toil-web.sh cleanup-jobs-index '' false
 }
 
 init-server-html() {
@@ -274,7 +287,10 @@ make-job-wwz() {
   # _tmp/toil: Logs are in _tmp, see services/toil-worker.sh
   # web/ : spec test HTML references this.
   #        Note that that index references /web/{base,toil}.css, outside the .wwz
-  zip -r $wwz index.html _tmp/toil _tmp/spec web/{base,spec-tests}.css
+  # temporary: debug dash
+  zip -r $wwz \
+    index.html _tmp/toil _tmp/spec _tmp/syscall \
+    web/{base,spec-code,spec-tests}.css
 }
 
 deploy-job-results() {
@@ -315,9 +331,6 @@ deploy-job-results() {
   log "http://travis-ci.oilshell.org/jobs/"
   log "http://travis-ci.oilshell.org/jobs/$job_id.wwz/"
   log ''
-
-  # toil-worker.sh recorded this for us
-  return $(cat _tmp/toil/exit-status.txt)
 }
 
 format-jobs-index() {
@@ -399,6 +412,12 @@ publish-html() {
 
   write-jobs-raw
   remote-rewrite-jobs-index
+
+  # note: we could speed jobs up by doing this separately?
+  remote-cleanup-jobs-index
+
+  # toil-worker.sh recorded this for us
+  return $(cat _tmp/toil/exit-status.txt)
 }
 
 "$@"

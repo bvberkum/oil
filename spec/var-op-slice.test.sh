@@ -59,18 +59,26 @@ echo ${foo:3:-1} ${foo: 3: -2} ${foo:3 :-3 }
 
 
 #### strict_word_eval with string slice
-shopt -s strict_word_eval || true
-echo slice
 s='abc'
+echo -${s: -1}-
 echo -${s: -2}-
+echo -${s: -3}-
+shopt -s strict_word_eval || true
+echo -${s: -2}-
+echo ----
 ## STDOUT:
-slice
+--
+--
+--
 ## END
 ## status: 1
 ## N-I bash/mksh/zsh status: 0
 ## N-I bash/mksh/zsh STDOUT:
-slice
+-c-
 -bc-
+-abc-
+-bc-
+----
 ## END
 
 #### String slice with math
@@ -170,7 +178,8 @@ ab
 #### Simple ${@:offset}
 
 set -- 4 5 6
-argv.py ${@:0} | sed 's/'$0'/SHELL/'
+result=$(argv.py ${@:0})
+echo ${result//"$0"/'SHELL'}
 argv.py ${@:1}
 argv.py ${@:2}
 ## STDOUT:
@@ -179,7 +188,7 @@ argv.py ${@:2}
 ['5', '6']
 ## END
 ## N-I mksh status: 1
-## N-I mksh stdout-json: ""
+## N-I mksh stdout-json: "\n"
 
 
 #### ${@:offset} and ${*:offset}
@@ -291,3 +300,12 @@ fun "a 1" "b 2" "c 3"
 ## N-I mksh status: 1
 ## N-I mksh stdout-json: ""
 ## BUG zsh stdout-json: ""
+
+#### ${@:0:1}
+set a b c
+result=$(echo ${@:0:1})
+echo ${result//"$0"/'SHELL'}
+## STDOUT:
+SHELL
+## END
+## N-I mksh stdout-json: "\n"

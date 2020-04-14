@@ -20,6 +20,7 @@ from _devbuild.gen.runtime_asdl import (
 )
 from _devbuild.gen import runtime_asdl  # for cell
 from asdl import runtime
+from core import error
 from core import pyutil
 from core.pyutil import e_usage, stderr_line
 from core import ui
@@ -277,6 +278,10 @@ class MutableOpts(object):
   def set_interactive(self):
     # type: () -> None
     self.opt_array[option_i.interactive] = True
+
+  def set_emacs(self):
+    # type: () -> None
+    self.opt_array[option_i.emacs] = True
 
   def set_xtrace(self, b):
     # type: (bool) -> None
@@ -610,7 +615,7 @@ def _InitVarsFromEnv(mem, environ):
   # variable.  Dash has a loop through environ in init.c
   for n, v in iteritems(environ):
     mem.SetVar(lvalue.Named(n), value.Str(v), scope_e.GlobalOnly,
-                flags=SetExport)
+               flags=SetExport)
 
   # If it's not in the environment, initialize it.  This makes it easier to
   # update later in MutableOpts.
@@ -636,12 +641,13 @@ def _InitVarsFromEnv(mem, environ):
       lvalue.Named('PWD'), None, scope_e.GlobalOnly, flags=SetExport)
 
 
-def InitMem(mem, environ):
-  # type: (Mem, Dict[str, str]) -> None
+def InitMem(mem, environ, version_str):
+  # type: (Mem, Dict[str, str], str) -> None
   """
   Initialize memory with shell defaults.  Other interpreters could have
   different builtin variables.
   """
+  SetGlobalString(mem, 'OIL_VERSION', version_str)
   _InitDefaults(mem)
   _InitVarsFromEnv(mem, environ)
   # MUTABLE GLOBAL that's SEPARATE from $PWD.  Used by the 'pwd' builtin, but
@@ -664,7 +670,7 @@ class Mem(object):
     Completion engine: for COMP_WORDS, etc.
     Builtins call it implicitly: read, cd for $PWD, $OLDPWD, etc.
 
-  Modules: cmd_exec, word_eval, expr_eval, completion
+  Modules: cmd_eval, word_eval, expr_eval, completion
   """
   def __init__(self, dollar0, argv, arena, debug_stack):
     # type: (str, List[str], Arena, List[DebugFrame]) -> None
@@ -1244,7 +1250,7 @@ class Mem(object):
         # This could be an object, eggex object, etc.  It won't be
         # AssocArray shouldn because we query IsAssocArray before evaluating
         # sh_lhs_expr.  Could conslidate with s[i] case above
-        e_die("Object of type %s can't be indexed",
+        e_die("Value of type %s can't be indexed",
               ui.ValType(cell.val), span_id=left_spid)
 
       elif case(lvalue_e.Keyed):
@@ -1383,41 +1389,86 @@ class Mem(object):
 
     return value.Undef()
 
-  def GetCell(self, name):
-    # type: (str) -> cell
+  def GetCell(self, name, lookup_mode=scope_e.Dynamic):
+    # type: (str, scope_t) -> cell
     """For the 'repr' builtin."""
-    cell, _ = self._ResolveNameOnly(name, scope_e.Dynamic)
+    cell, _ = self._ResolveNameOnly(name, lookup_mode)
     return cell
 
-  def Unset(self, lval, lookup_mode):
-    # type: (lvalue__Named, scope_t) -> Tuple[bool, bool]
+  def Unset(self, lval, lookup_mode, strict):
+    # type: (lvalue_t, scope_t, bool) -> bool
     """
     Returns:
-      ok bool, found bool.
-
-      ok is false if the cell is read-only.
-      found is false if the name is not there.
+      Whether the cell was found.
     """
-    if lval.tag == lvalue_e.Named:  # unset x
-      cell, name_map, cell_name = self._ResolveNameOrRef(lval.name, lookup_mode)
-      #log('cell %s', cell)
-      if cell:
-        found = True
-        if cell.readonly:
-          return False, found
+    # TODO: Refactor lvalue type to avoid this
+    UP_lval = lval
+
+    with tagswitch(lval) as case:
+      if case(lvalue_e.Named):  # unset x
+        lval = cast(lvalue__Named, UP_lval)
+        var_name = lval.name
+      elif case(lvalue_e.Indexed):  # unset 'a[1]'
+        lval = cast(lvalue__Indexed, UP_lval)
+        var_name = lval.name
+      elif case(lvalue_e.Keyed):  # unset 'A["K"]'
+        lval = cast(lvalue__Keyed, UP_lval)
+        var_name = lval.name
+      else:
+        raise AssertionError()
+
+    cell, name_map, cell_name = self._ResolveNameOrRef(var_name, lookup_mode)
+    if not cell:
+      return False  # 'unset' builtin falls back on functions
+    if cell.readonly:
+      raise error.Runtime("Can't unset readonly variable %r" % var_name)
+
+    with tagswitch(lval) as case:
+      if case(lvalue_e.Named):  # unset x
         name_map[cell_name].val = value.Undef()
         cell.exported = False
         # This should never happen because we do recursive lookups of namerefs.
         assert not cell.nameref, cell
-        return True, found # found
+
+      elif case(lvalue_e.Indexed):  # unset 'a[1]'
+        lval = cast(lvalue__Indexed, UP_lval)
+
+        val = cell.val
+        UP_val = val
+        if val.tag_() != value_e.MaybeStrArray:
+          raise error.Runtime("%r isn't an array" % var_name)
+
+        val = cast(value__MaybeStrArray, UP_val)
+        # Note: Setting an entry to None and shifting entries are pretty
+        # much the same in shell.
+        try:
+          val.strs[lval.index] = None
+        except IndexError:
+          # note: we could have unset --strict for this case?
+          # Oil may make it strict
+          pass
+
+      elif case(lvalue_e.Keyed):  # unset 'A["K"]'
+        lval = cast(lvalue__Keyed, UP_lval)
+
+        val = cell.val
+        UP_val = val
+
+        # note: never happens because of mem.IsAssocArray test for lvalue.Keyed
+        #if val.tag_() != value_e.AssocArray:
+        #  raise error.Runtime("%r isn't an associative array" % lval.name)
+
+        val = cast(value__AssocArray, UP_val)
+        try:
+          del val.d[lval.key]
+        except KeyError:
+          # note: we could have unset --strict for this case?
+          pass
+
       else:
-        return True, False
+        raise AssertionError(lval)
 
-    elif lval.tag == lvalue_e.Indexed:  # unset a[1]
-      raise NotImplementedError()
-
-    else:
-      raise AssertionError()
+    return True
 
   def ClearFlag(self, name, flag, lookup_mode):
     # type: (str, int, scope_t) -> bool
@@ -1492,6 +1543,33 @@ class Mem(object):
           str_val = cast(value__Str, val)
           result[name] = str_val.s
     return result
+
+  def GetAllCells(self, lookup_mode=scope_e.Dynamic):
+    # type: (scope_t) -> Dict[str, cell]
+    """Get all variables and their values, for 'set' builtin. """
+    result = {}  # type: Dict[str, cell]
+
+    if lookup_mode == scope_e.Dynamic:
+      scopes = self.var_stack
+    elif lookup_mode == scope_e.LocalOnly:
+      scopes = self.var_stack[-1:]
+    elif lookup_mode == scope_e.GlobalOnly:
+      scopes = self.var_stack[0:1]
+    elif lookup_mode == scope_e.LocalOrGlobal:
+      scopes = self.var_stack[0:1]
+      if len(self.var_stack) > 1:
+        scopes.append(self.var_stack[-1])
+    else:
+      raise AssertionError()
+
+    for scope in scopes:
+      for name, cell in iteritems(scope):
+        result[name] = cell
+    return result
+
+  def IsGlobalScope(self):
+    # type: () -> bool
+    return len(self.var_stack) == 1
 
 
 def SetLocalString(mem, name, s):

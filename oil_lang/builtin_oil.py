@@ -18,16 +18,15 @@ from core.util import log
 from frontend import args
 from frontend import match
 from mycpp.mylib import tagswitch
-from osh import builtin_misc  # ReadLineFromStdin
 
 import yajl
-import posix_
+import posix_ as posix
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
   from core.ui import ErrorFormatter
   from core.state import Mem
-  from osh.cmd_exec import Executor
+  from osh.cmd_eval import CommandEvaluator
 
 
 class _Builtin(object):
@@ -191,6 +190,11 @@ JSON_READ_SPEC.Flag('-validate', args.Bool, default=True,
 
 _JSON_ACTION_ERROR = "builtin expects 'read' or 'write'"
 
+# global file object that can be passed to yajl.load(), and that also can be
+# used with redirects.  See comment below.
+_STDIN = posix.fdopen(0)
+
+
 class Json(object):
   """Json I/O.
 
@@ -210,10 +214,10 @@ class Json(object):
       json echo &myobj 
   Well that will get confused with a redirect.
   """
-  def __init__(self, mem, ex, errfmt):
-    # type: (Mem, Executor, ErrorFormatter) -> None
+  def __init__(self, mem, cmd_ev, errfmt):
+    # type: (Mem, CommandEvaluator, ErrorFormatter) -> None
     self.mem = mem
-    self.ex = ex
+    self.cmd_ev = cmd_ev
     self.errfmt = errfmt
 
   def Run(self, cmd_val):
@@ -266,7 +270,7 @@ class Json(object):
       # TODO: Accept a block.  They aren't hooked up yet.
       if cmd_val.block:
         # TODO: flatten value.{Str,Obj} into a flat dict?
-        namespace = self.ex.EvalBlock(cmd_val.block)
+        namespace = self.cmd_ev.EvalBlock(cmd_val.block)
 
         print(yajl.dump(namespace))
 
@@ -283,11 +287,19 @@ class Json(object):
         raise args.UsageError('got invalid variable name %r' % var_name,
                               span_id=name_spid)
 
-      # Have to use this over sys.stdin because of redirects
-      # TODO: change binding to yajl.readfd() ?
-      stdin = posix_.fdopen(0)
       try:
-        obj = yajl.load(stdin)
+        # Use a global _STDIN, because we get EBADF on a redirect if we use a
+        # local.  A Py_DECREF closes the file, which we don't want, because the
+        # redirect is responsible for freeing it.
+        #
+        # https://github.com/oilshell/oil/issues/675
+        #
+        # TODO: write a better binding like yajl.readfd()
+        #
+        # It should use streaming like here:
+        # https://lloyd.github.io/yajl/
+
+        obj = yajl.load(_STDIN)
       except ValueError as e:
         self.errfmt.Print('json read: %s', e, span_id=action_spid)
         return 1
@@ -342,6 +354,26 @@ class Write(_Builtin):
     return 0
 
 
+def _ReadLine():
+  # type: () -> str
+  """Read a line from stdin.
+
+  TODO: use a more efficient function in C
+  """
+  chars = []
+  while True:
+    c = posix.read(0, 1)
+    if not c:
+      break
+
+    chars.append(c)
+
+    if c == '\n':
+      break
+
+  return ''.join(chars)
+
+
 GETLINE_SPEC = args.OilFlags()
 GETLINE_SPEC.Flag('-cstr', args.Bool,
                     help='Decode the line in CSTR format')
@@ -374,9 +406,8 @@ class Getline(_Builtin):
     if next_arg is not None:
       raise args.UsageError('got extra argument', span_id=next_spid)
 
-    # TODO: use a more efficient function in C
-    line = builtin_misc.ReadLineFromStdin()
-    if not line:  # EOF
+    line = _ReadLine()
+    if len(line) == 0:  # EOF
       return 1
 
     if not arg.end:

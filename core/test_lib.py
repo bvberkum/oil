@@ -20,6 +20,7 @@ from asdl import runtime
 from core import alloc
 from core import completion
 from core import dev
+from core import executor
 from core import main_loop
 from core import meta
 from core import optview
@@ -35,7 +36,7 @@ from osh import builtin_assign
 from osh import builtin_comp
 from osh import builtin_misc
 from osh import builtin_pure
-from osh import cmd_exec
+from osh import cmd_eval
 from osh import prompt
 from osh import sh_expr_eval
 from osh import split
@@ -130,7 +131,7 @@ def InitLexer(s, arena):
 def InitWordEvaluator():
   arena = MakeArena('<InitWordEvaluator>')
   mem = state.Mem('', [], arena, [])
-  state.InitMem(mem, {})
+  state.InitMem(mem, {}, '0.1')
 
   opt_array = [False] * option_i.ARRAY_SIZE
   errexit = state._ErrExit()
@@ -138,8 +139,8 @@ def InitWordEvaluator():
   exec_opts = optview.Exec(opt_array, errexit)
   mem.exec_opts = exec_opts  # circular dep
 
-  exec_deps = cmd_exec.Deps()
-  exec_deps.trap_nodes = []
+  cmd_deps = cmd_eval.Deps()
+  cmd_deps.trap_nodes = []
 
   splitter = split.SplitContext(mem)
   errfmt = ui.ErrorFormatter(arena)
@@ -148,7 +149,7 @@ def InitWordEvaluator():
   return ev
 
 
-def InitExecutor(parse_ctx=None, comp_lookup=None, arena=None, mem=None,
+def InitCommandEvaluator(parse_ctx=None, comp_lookup=None, arena=None, mem=None,
                  aliases=None, ext_prog=None):
   opt_array = [False] * option_i.ARRAY_SIZE
   if parse_ctx:
@@ -158,7 +159,7 @@ def InitExecutor(parse_ctx=None, comp_lookup=None, arena=None, mem=None,
     parse_ctx = InitParseContext()
 
   mem = mem or state.Mem('', [], arena, [])
-  state.InitMem(mem, {})
+  state.InitMem(mem, {}, '0.1')
   errexit = state._ErrExit()
   exec_opts = optview.Exec(opt_array, errexit)
   mutable_opts = state.MutableOpts(mem, opt_array, errexit, None)
@@ -167,14 +168,23 @@ def InitExecutor(parse_ctx=None, comp_lookup=None, arena=None, mem=None,
   errfmt = ui.ErrorFormatter(arena)
   job_state = process.JobState()
   fd_state = process.FdState(errfmt, job_state)
-  funcs = {}
   aliases = {} if aliases is None else aliases
+  procs = {}
 
   compopt_state = completion.OptionState()
   comp_lookup = comp_lookup or completion.Lookup()
 
   readline = None  # simulate not having it
-  new_var = builtin_assign.NewVar(mem, funcs, errfmt)
+
+  new_var = builtin_assign.NewVar(mem, procs, errfmt)
+  assign_builtins = {
+      builtin_i.declare: new_var,
+      builtin_i.typeset: new_var,
+      builtin_i.local: new_var,
+
+      builtin_i.export_: builtin_assign.Export(mem, errfmt),
+      builtin_i.readonly: builtin_assign.Readonly(mem, errfmt),
+  }
   builtins = {  # Lookup
       builtin_i.echo: builtin_pure.Echo(exec_opts),
       builtin_i.shift: builtin_assign.Shift(mem),
@@ -186,78 +196,71 @@ def InitExecutor(parse_ctx=None, comp_lookup=None, arena=None, mem=None,
 
       builtin_i.alias: builtin_pure.Alias(aliases, errfmt),
       builtin_i.unalias: builtin_pure.UnAlias(aliases, errfmt),
-
-      builtin_i.declare: new_var,
-      builtin_i.typeset: new_var,
-      builtin_i.local: new_var,
-
-      builtin_i.export_: builtin_assign.Export(mem, errfmt),
-      builtin_i.readonly: builtin_assign.Readonly(mem, errfmt),
   }
 
   debug_f = util.DebugFile(sys.stderr)
-  exec_deps = cmd_exec.Deps()
-  exec_deps.mutable_opts = state.MutableOpts(mem, opt_array, errexit, None)
-  exec_deps.search_path = state.SearchPath(mem)
-  exec_deps.errfmt = errfmt
-  exec_deps.trap_nodes = []
-  exec_deps.job_state = job_state
-  exec_deps.waiter = process.Waiter(exec_deps.job_state, exec_opts)
+  cmd_deps = cmd_eval.Deps()
+  cmd_deps.mutable_opts = mutable_opts
+  cmd_deps.trap_nodes = []
 
-  exec_deps.ext_prog = \
-      ext_prog or process.ExternalProgram('', fd_state,
-                                          exec_deps.search_path, errfmt,
-                                          debug_f)
+  search_path = state.SearchPath(mem)
+  waiter = process.Waiter(job_state, exec_opts)
 
-  exec_deps.dumper = dev.CrashDumper('')
-  exec_deps.debug_f = debug_f
-  exec_deps.trace_f = debug_f
+  ext_prog = \
+      ext_prog or process.ExternalProgram('', fd_state, errfmt, debug_f)
+
+  cmd_deps.dumper = dev.CrashDumper('')
+  cmd_deps.debug_f = debug_f
 
   splitter = split.SplitContext(mem)
 
-  procs = {}
-
-  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, errfmt)
-  bool_ev = sh_expr_eval.BoolEvaluator(mem, exec_opts, errfmt)
+  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, parse_ctx, errfmt)
+  bool_ev = sh_expr_eval.BoolEvaluator(mem, exec_opts, parse_ctx, errfmt)
   expr_ev = expr_eval.OilEvaluator(mem, procs, errfmt)
   word_ev = word_eval.NormalWordEvaluator(mem, exec_opts, splitter, errfmt)
-  ex = cmd_exec.Executor(mem, fd_state, funcs, builtins, exec_opts,
-                         parse_ctx, exec_deps)
-  assert ex.mutable_opts is not None, ex
+  cmd_ev = cmd_eval.CommandEvaluator(mem, exec_opts, errfmt, procs,
+                                     assign_builtins, arena, cmd_deps)
+
+  shell_ex = executor.ShellExecutor(
+      mem, exec_opts, mutable_opts, procs, builtins, search_path,
+      ext_prog, waiter, job_state, fd_state, errfmt)
+
+  assert cmd_ev.mutable_opts is not None, cmd_ev
   prompt_ev = prompt.Evaluator('osh', parse_ctx, mem)
   tracer = dev.Tracer(parse_ctx, exec_opts, mutable_opts, mem, word_ev,
                       debug_f)
 
-  vm.InitCircularDeps(arith_ev, bool_ev, expr_ev, word_ev, ex, prompt_ev, tracer)
+  vm.InitCircularDeps(arith_ev, bool_ev, expr_ev, word_ev, cmd_ev, shell_ex,
+                      prompt_ev, tracer)
 
-  spec_builder = builtin_comp.SpecBuilder(ex, parse_ctx, word_ev, splitter,
+  spec_builder = builtin_comp.SpecBuilder(cmd_ev, parse_ctx, word_ev, splitter,
                                           comp_lookup)
   # Add some builtins that depend on the executor!
   complete_builtin = builtin_comp.Complete(spec_builder, comp_lookup)
   builtins[builtin_i.complete] = complete_builtin
   builtins[builtin_i.compgen] = builtin_comp.CompGen(spec_builder)
 
-  return ex
+  return cmd_ev
 
 
 def EvalCode(code_str, parse_ctx, comp_lookup=None, mem=None, aliases=None):
   """
-  Unit tests can evaluate code strings and then use the resulting Executor.
+  Unit tests can evaluate code strings and then use the resulting CommandEvaluator.
   """
   arena = parse_ctx.arena
 
   comp_lookup = comp_lookup or completion.Lookup()
   mem = mem or state.Mem('', [], arena, [])
-  state.InitMem(mem, {})
+  state.InitMem(mem, {}, '0.1')
 
   line_reader, _ = InitLexer(code_str, arena)
   c_parser = parse_ctx.MakeOshParser(line_reader)
 
-  ex = InitExecutor(parse_ctx=parse_ctx, comp_lookup=comp_lookup, arena=arena,
+  cmd_ev = InitCommandEvaluator(parse_ctx=parse_ctx, comp_lookup=comp_lookup, arena=arena,
                     mem=mem, aliases=aliases)
 
-  main_loop.Batch(ex, c_parser, arena)  # Parse and execute!
-  return ex
+  main_loop.Batch(cmd_ev, c_parser, arena)  # Parse and execute!
+  return cmd_ev
 
 
 def InitParseContext(arena=None, oil_grammar=None, aliases=None):

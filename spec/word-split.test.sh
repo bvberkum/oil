@@ -324,7 +324,7 @@ argv.py star $*
 ['at', 'a', 'b c']
 ['star', 'a', 'b c']
 ## END
-## BUG dash/ash STDOUT:
+## BUG ash STDOUT:
 ['at', 'ab c']
 ['star', 'ab c']
 ## END
@@ -340,7 +340,7 @@ printf '[%s]\n' $*
 [a]
 [b c]
 ## END
-## BUG dash/ash STDOUT:
+## BUG ash STDOUT:
 [ab c]
 [ab c]
 ## END
@@ -366,4 +366,12 @@ argv.py ${word}:
 ## STDOUT:
 ['a', ':b']
 ['a', ':']
+## END
+
+#### Bug #698, similar crash
+var='\'
+set -f
+echo $var
+## STDOUT:
+\
 ## END

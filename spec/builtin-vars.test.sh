@@ -375,6 +375,8 @@ status=127
 ## END
 
 #### Unset array member
+shopt -s eval_unsafe_arith
+
 a=(x y z)
 unset 'a[1]'
 echo status=$?
@@ -389,12 +391,129 @@ x z len=2
 status=0
  y z len=3
 ## END
-## N-I osh STDOUT:
-status=2
-x y z len=3
+
+#### Unset errors
+shopt -s eval_unsafe_arith
+
+unset undef
+echo status=$?
+
+a=(x y z)
+unset 'a[99]'  # out of range
+echo status=$?
+
+unset 'not_array[99]'  # not an array
+echo status=$?
+
+## STDOUT:
+status=0
+status=0
+status=0
+## END
+## N-I dash status: 2
+## N-I dash STDOUT:
+status=0
 ## END
 
-#### Unset array member with expression
+#### Unset wrong type
+case $SH in (mksh) exit ;; esac
+
+shopt -s eval_unsafe_arith || true
+
+declare undef
+unset -v 'undef[1]'
+echo undef $?
+unset -v 'undef["key"]'
+echo undef $?
+
+declare a=(one two)
+unset -v 'a[1]'
+echo array $?
+
+#shopt -s strict_arith || true
+# In Oil, the string 'key' is converted to an integer, which is 0, unless
+# strict_arith is on, when it fails.
+unset -v 'a["key"]'
+echo array $?
+
+declare -A A=(['key']=val)
+unset -v 'A[1]'
+echo assoc $?
+unset -v 'A["key"]'
+echo assoc $?
+
+## STDOUT:
+undef 1
+undef 1
+array 0
+array 1
+assoc 0
+assoc 0
+## END
+## OK osh STDOUT:
+undef 1
+undef 1
+array 0
+array 0
+assoc 0
+assoc 0
+## END
+## BUG zsh STDOUT:
+undef 0
+undef 1
+array 0
+array 1
+assoc 0
+assoc 0
+## END
+## N-I dash/mksh stdout-json: ""
+## N-I dash status: 2
+
+
+#### unset -v assoc (related to issue #661)
+shopt -s eval_unsafe_arith || true
+
+case $SH in (dash|mksh|zsh) return; esac
+
+declare -A dict=()
+key=1],a[1
+dict["$key"]=foo
+echo ${#dict[@]}
+echo keys=${!dict[@]}
+echo vals=${dict[@]}
+
+unset -v 'dict["$key"]'
+echo ${#dict[@]}
+echo keys=${!dict[@]}
+echo vals=${dict[@]}
+## STDOUT:
+1
+keys=1],a[1
+vals=foo
+0
+keys=
+vals=
+## END
+## N-I dash/mksh/zsh stdout-json: ""
+
+#### unset assoc errors
+shopt -s eval_unsafe_arith || true
+
+case $SH in (dash|mksh) return; esac
+
+declare -A assoc=(['key']=value)
+unset 'assoc["nonexistent"]'
+echo status=$?
+
+## STDOUT:
+status=0
+## END
+## N-I dash/mksh stdout-json: ""
+
+
+#### Unset array member with dynamic parsing
+shopt -s eval_unsafe_arith
+
 i=1
 a=(w x y z)
 unset 'a[ i - 1 ]' a[i+1]  # note: can't have space between a and [
@@ -408,10 +527,6 @@ x z len=2
 ## N-I dash stdout-json: ""
 ## N-I zsh status: 1
 ## N-I zsh stdout-json: ""
-## N-I osh STDOUT:
-status=2
-w x y z len=4
-## END
 
 #### Use local twice
 f() {

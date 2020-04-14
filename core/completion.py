@@ -19,7 +19,7 @@ Completion should run in threads?  For two reasons:
 - completion can be in another process anyway?
 
 Does that mean the user code gets run in an entirely separate interpreter?  The
-whole lexer/parser/cmd_exec combo has to be thread-safe.  Does it get a copy of
+whole lexer/parser/cmd_eval combo has to be thread-safe.  Does it get a copy of
 the same startup state?
 
 Features TODO:
@@ -36,7 +36,7 @@ from __future__ import print_function
 import pwd
 import time
 
-from _devbuild.gen.syntax_asdl import word_part_e, redir_e, Id
+from _devbuild.gen.syntax_asdl import word_part_e, redir_param_e, Id
 from _devbuild.gen.runtime_asdl import value_e
 from _devbuild.gen.types_asdl import redir_arg_type_e
 
@@ -371,13 +371,13 @@ class FileSystemAction(CompletionAction):
 class ShellFuncAction(CompletionAction):
   """Call a user-defined function using bash's completion protocol."""
 
-  def __init__(self, ex, func, comp_lookup):
+  def __init__(self, cmd_ev, func, comp_lookup):
     """
     Args:
       comp_lookup: For the 124 protocol: test if the user-defined function
       registered a new UserSpec.
     """
-    self.ex = ex
+    self.cmd_ev = cmd_ev
     self.func = func
     self.comp_lookup = comp_lookup
 
@@ -386,14 +386,14 @@ class ShellFuncAction(CompletionAction):
     return '<ShellFuncAction %s>' % (self.func.name,)
 
   def log(self, *args):
-    self.ex.debug_f.log(*args)
+    self.cmd_ev.debug_f.log(*args)
 
   def Matches(self, comp):
     # Have to clear the response every time.  TODO: Reuse the object?
-    state.SetGlobalArray(self.ex.mem, 'COMPREPLY', [])
+    state.SetGlobalArray(self.cmd_ev.mem, 'COMPREPLY', [])
 
     # New completions should use COMP_ARGV, a construct specific to OSH>
-    state.SetGlobalArray(self.ex.mem, 'COMP_ARGV', comp.partial_argv)
+    state.SetGlobalArray(self.cmd_ev.mem, 'COMP_ARGV', comp.partial_argv)
 
     # Old completions may use COMP_WORDS.  It is split by : and = to emulate
     # bash's behavior. 
@@ -407,17 +407,17 @@ class ShellFuncAction(CompletionAction):
     else:
       comp_cword = len(comp_words) - 1  # weird invariant
 
-    state.SetGlobalArray(self.ex.mem, 'COMP_WORDS', comp_words)
-    state.SetGlobalString(self.ex.mem, 'COMP_CWORD', str(comp_cword))
-    state.SetGlobalString(self.ex.mem, 'COMP_LINE', comp.line)
-    state.SetGlobalString(self.ex.mem, 'COMP_POINT', str(comp.end))
+    state.SetGlobalArray(self.cmd_ev.mem, 'COMP_WORDS', comp_words)
+    state.SetGlobalString(self.cmd_ev.mem, 'COMP_CWORD', str(comp_cword))
+    state.SetGlobalString(self.cmd_ev.mem, 'COMP_LINE', comp.line)
+    state.SetGlobalString(self.cmd_ev.mem, 'COMP_POINT', str(comp.end))
 
     argv = [comp.first, comp.to_complete, comp.prev]
     self.log('Running completion function %r with arguments %s',
              self.func.name, argv)
 
     self.comp_lookup.ClearCommandsChanged()
-    status = self.ex.RunFuncForCompletion(self.func, argv)
+    status = self.cmd_ev.RunFuncForCompletion(self.func, argv)
     commands_changed = self.comp_lookup.GetCommandsChanged()
 
     self.log('comp.first %s, commands_changed: %s', comp.first,
@@ -439,7 +439,7 @@ class ShellFuncAction(CompletionAction):
 
     # Read the response.
     # NOTE: 'COMP_REPLY' would follow the naming convention!
-    val = state.GetGlobal(self.ex.mem, 'COMPREPLY')
+    val = state.GetGlobal(self.cmd_ev.mem, 'COMPREPLY')
     if val.tag == value_e.Undef:
       # We set it above, so this error would only happen if the user unset it.
       # Not changing it means there were no completions.
@@ -830,13 +830,15 @@ class RootCompleter(object):
     if trail.redirects:
       r = trail.redirects[-1]
       # Only complete 'echo >', but not 'echo >&' or 'cat <<'
-      if (r.tag == redir_e.Redir and
+      # TODO: Don't complete <<< 'h'
+      if (r.arg.tag_() == redir_param_e.Word and
           consts.RedirArgType(r.op.id) == redir_arg_type_e.Path):
-        if WordEndsWithCompDummy(r.arg_word):
+        arg_word = r.arg
+        if WordEndsWithCompDummy(arg_word):
           debug_f.log('Completing redirect arg')
 
           try:
-            val = self.word_ev.EvalWordToString(r.arg_word)
+            val = self.word_ev.EvalWordToString(r.arg)
           except error.FatalRuntime as e:
             debug_f.log('Error evaluating redirect word: %s', e)
             return
@@ -844,7 +846,7 @@ class RootCompleter(object):
             debug_f.log("Didn't get a string from redir arg")
             return
 
-          span_id = word_.LeftMostSpanForWord(r.arg_word)
+          span_id = word_.LeftMostSpanForWord(arg_word)
           span = arena.GetLineSpan(span_id)
 
           self.comp_ui_state.display_pos = span.col

@@ -6,7 +6,7 @@
 #
 #   http://www.apache.org/licenses/LICENSE-2.0
 """
-cmd_exec.py -- Interpreter for the command language.
+cmd_eval.py -- Interpreter for the command language.
 
 Problems:
 $ < Makefile cat | < NOTES.txt head
@@ -15,12 +15,9 @@ This just does head?  Last one wins.
 """
 from __future__ import print_function
 
-import resource
-import time
 import sys
 
 from _devbuild.gen.id_kind_asdl import Id, Id_str
-from _devbuild.gen.option_asdl import builtin_i, builtin_t
 from _devbuild.gen.syntax_asdl import (
     compound_word,
     command_e, command_t, command_str,
@@ -53,41 +50,34 @@ from _devbuild.gen.syntax_asdl import (
     command__TimeBlock,
     command__VarDecl,
     command__WhileUntil,
-    assign_op_e, source,
+    assign_op_e,
     place_expr__Var,
     proc_sig_e, proc_sig__Closed,
-    redir_e, redir__Redir, redir__HereDoc,
+    redir_param_e, redir_param__MultiLine,
 )
 from _devbuild.gen.runtime_asdl import (
     quote_e,
     lvalue, lvalue_e, lvalue__ObjIndex, lvalue__ObjAttr,
-    value, value_e, value_t, value__Str, value__MaybeStrArray, value__Obj,
-    redirect, scope_e,
-    cmd_value__Argv, cmd_value, cmd_value_e,
-    cmd_value__Argv, cmd_value__Assign,
+    value, value_e, value_t, value__Int, value__Str, value__MaybeStrArray,
+    redirect, redirect_arg, scope_e,
+    cmd_value_e, cmd_value__Argv, cmd_value__Assign,
 )
 from _devbuild.gen.types_asdl import redir_arg_type_e
 
 from asdl import runtime
-
 from core import error
-from core import main_loop
-from core import process
+from core.error import _ControlFlow
+from core import passwd  # Time().  TODO: rename
+from core import state
 from core import ui
 from core import util
 from core.util import log, e_die
-
 from frontend import args
 from frontend import consts
-from frontend import reader
-
 from oil_lang import objects
 from osh import braces
-from osh import builtin_pure
 from osh import sh_expr_eval
-from core import state
 from osh import word_
-
 from mycpp import mylib
 from mycpp.mylib import switch, tagswitch, NewStr
 
@@ -98,18 +88,18 @@ from typing import List, Dict, Tuple, Any, cast, TYPE_CHECKING
 
 if TYPE_CHECKING:
   from _devbuild.gen.id_kind_asdl import Id_t
+  from _devbuild.gen.option_asdl import builtin_t
   from _devbuild.gen.runtime_asdl import (
-      cmd_value_t, cell, lvalue_t, redirect_t,
+      cmd_value_t, cell, lvalue_t,
   )
   from _devbuild.gen.syntax_asdl import (
-      Token, source_t, redir_t, expr__Lambda, env_pair, proc_sig__Closed,
+      redir, expr__Lambda, env_pair, proc_sig__Closed,
   )
-  from core.ui import ErrorFormatter
+  from core.alloc import Arena
   from core import dev
+  from core.executor import ShellExecutor
   from core import optview
-  from frontend.parse_lib import ParseContext
   from oil_lang import expr_eval
-  from osh.cmd_parse import CommandParser
   from osh import word_eval
   from osh import builtin_process
   from osh.builtin_misc import _Builtin
@@ -153,75 +143,17 @@ def _DisallowErrExit(node):
   return False
 
 
-class _ControlFlow(Exception):
-  """Internal execption for control flow.
-
-  break and continue are caught by loops, return is caught by functions.
-
-  NOTE: I tried representing this in ASDL, but in Python the base class has to
-  be BaseException.  Also, 'token' is in syntax.asdl but not runtime.asdl.
-
-  cflow =
-    -- break, continue, return, exit
-    Shell(token keyword, int arg)
-    -- break, continue
-  | OilLoop(token keyword)
-    -- return
-  | OilReturn(token keyword, value val)
-  """
-
-  def __init__(self, token, arg):
-    # type: (Token, int) -> None
-    """
-    Args:
-      token: the keyword token
-    """
-    self.token = token
-    self.arg = arg
-
-  def IsReturn(self):
-    # type: () -> bool
-    return self.token.id == Id.ControlFlow_Return
-
-  def IsBreak(self):
-    # type: () -> bool
-    return self.token.id == Id.ControlFlow_Break
-
-  def IsContinue(self):
-    # type: () -> bool
-    return self.token.id == Id.ControlFlow_Continue
-
-  def StatusCode(self):
-    # type: () -> int
-    assert self.IsReturn()
-    return self.arg
-
-  def __repr__(self):
-    # type: () -> str
-    return '<_ControlFlow %s>' % self.token
-
-
 class Deps(object):
   def __init__(self):
     # type: () -> None
     self.mutable_opts = None  # type: state.MutableOpts
-    self.search_path = None # type: state.SearchPath
-    self.ext_prog = None    # type: process.ExternalProgram
-
     self.dumper = None      # type: dev.CrashDumper
-    self.tracer = None      # type: dev.Tracer
-
-    self.errfmt = None      # type: ErrorFormatter
     self.debug_f = None     # type: util.DebugFile
-    self.trace_f = None     # type: util.DebugFile
 
     # signal/hook name -> handler
     self.traps = None       # type: Dict[str, builtin_process._TrapHandler]
     # appended to by signal handlers
     self.trap_nodes = None  # type: List[command_t]
-
-    self.job_state = None   # type: process.JobState
-    self.waiter = None      # type: process.Waiter
 
 
 if mylib.PYTHON:
@@ -254,32 +186,31 @@ def _PackFlags(keyword_id, flags=0):
   return (keyword_id << 8) | flags
 
 
-class Executor(object):
+class CommandEvaluator(object):
   """Executes the program by tree-walking.
 
   It also does some double-dispatch by passing itself into Eval() for
   Compound/WordPart.
   """
   def __init__(self,
-               mem,          # type: state.Mem
-               fd_state,     # type: process.FdState
-               procs,        # type: Dict[str, command__ShFunction]
-               builtins,     # type: Dict[builtin_t, _Builtin]
-               exec_opts,    # type: optview.Exec
-               parse_ctx,    # type: ParseContext
-               exec_deps,    # type: Deps
+               mem,              # type: state.Mem
+               exec_opts,        # type: optview.Exec
+               errfmt,           # type: ui.ErrorFormatter
+               procs,            # type: Dict[str, command__ShFunction]
+               assign_builtins,  # type: Dict[builtin_t, _Builtin]
+               arena,            # type: Arena
+               cmd_deps,         # type: Deps
   ):
     # type: (...) -> None
     """
     Args:
       mem: Mem instance for storing variables
-      fd_state: FdState() for managing descriptors
       procs: dict of SHELL functions or 'procs'
-      builtins: dict of builtin callables (TODO: migrate all builtins here)
-      exec_opts: MutableOpts
-      parse_ctx: for instantiating parsers
-      exec_deps: A bundle of stateless code
+      builtins: dict of builtin callables
+                TODO: This should only be for assignment builtins?
+      cmd_deps: A bundle of stateless code
     """
+    self.shell_ex = None  # type: ShellExecutor
     self.arith_ev = None  # type: sh_expr_eval.ArithEvaluator
     self.bool_ev = None  # type: sh_expr_eval.BoolEvaluator
     self.expr_ev = None  # type: expr_eval.OilEvaluator
@@ -287,32 +218,22 @@ class Executor(object):
     self.tracer = None  # type: dev.Tracer
 
     self.mem = mem
-    self.fd_state = fd_state
-    self.procs = procs
-    self.builtins = builtins
     # This is for shopt and set -o.  They are initialized by flags.
     self.exec_opts = exec_opts
+    self.errfmt = errfmt
+    self.procs = procs
+    self.assign_builtins = assign_builtins
+    self.arena = arena
 
-    self.parse_ctx = parse_ctx
-    self.arena = parse_ctx.arena
-    self.aliases = parse_ctx.aliases  # alias name -> string
+    self.mutable_opts = cmd_deps.mutable_opts
+    self.dumper = cmd_deps.dumper
+    self.debug_f = cmd_deps.debug_f  # Used by ShellFuncAction too
 
-    self.mutable_opts = exec_deps.mutable_opts
-    self.dumper = exec_deps.dumper
-    self.errfmt = exec_deps.errfmt
-    self.debug_f = exec_deps.debug_f  # Used by ShellFuncAction too
-
-    self.search_path = exec_deps.search_path
-    self.ext_prog = exec_deps.ext_prog
-    self.traps = exec_deps.traps
-    self.trap_nodes = exec_deps.trap_nodes
-
-    # sleep 5 & puts a (PID, job#) entry here.  And then "jobs" displays it.
-    self.job_state = exec_deps.job_state
-    self.waiter = exec_deps.waiter
+    self.traps = cmd_deps.traps
+    self.trap_nodes = cmd_deps.trap_nodes
 
     self.loop_level = 0  # for detecting bad top-level break/continue
-    self.check_command_sub_status = False  # a hack
+    self.check_command_sub_status = False  # a hack.  Modified by ShellExecutor
 
   def CheckCircularDeps(self):
     # type: () -> None
@@ -321,232 +242,20 @@ class Executor(object):
     assert self.expr_ev is not None
     assert self.word_ev is not None
 
-  def _EvalHelper(self, c_parser, src):
-    # type: (CommandParser, source_t) -> int
-    self.arena.PushSource(src)
-    try:
-      return main_loop.Batch(self, c_parser, self.arena)
-    finally:
-      self.arena.PopSource()
-
-  def _Eval(self, cmd_val):
-    # type: (cmd_value__Argv) -> int
-    if self.exec_opts.strict_eval_builtin():
-      # To be less confusing, eval accepts EXACTLY one string arg.
-      n = len(cmd_val.argv)
-      if n != 2:
-        raise args.UsageError('requires exactly 1 argument, got %d' % (n-1))
-      code_str = cmd_val.argv[1]
-    else:
-      code_str = ' '.join(cmd_val.argv[1:])
-    eval_spid = cmd_val.arg_spids[0]
-
-    line_reader = reader.StringLineReader(code_str, self.arena)
-    c_parser = self.parse_ctx.MakeOshParser(line_reader)
-
-    src = source.EvalArg(eval_spid)
-    return self._EvalHelper(c_parser, src)
-
-  def ParseTrapCode(self, code_str):
-    # type: (str) -> command_t
-    """
-    Returns:
-      A node, or None if the code is invalid.
-    """
-    line_reader = reader.StringLineReader(code_str, self.arena)
-    c_parser = self.parse_ctx.MakeOshParser(line_reader)
-
-    # TODO: the SPID should be passed through argv
-    self.arena.PushSource(source.Trap(runtime.NO_SPID))
-    try:
-      try:
-        node = main_loop.ParseWholeFile(c_parser)
-      except error.Parse as e:
-        ui.PrettyPrintError(e, self.arena)
-        return None
-
-    finally:
-      self.arena.PopSource()
-
-    return node
-
-  def _Source(self, cmd_val):
-    # type: (cmd_value__Argv) -> int
-    argv = cmd_val.argv
-    call_spid = cmd_val.arg_spids[0]
-
-    try:
-      path = argv[1]
-    except IndexError:
-      raise args.UsageError('missing required argument')
-
-    resolved = self.search_path.Lookup(path, exec_required=False)
-    if resolved is None:
-      resolved = path
-    try:
-      f = self.fd_state.Open(resolved)  # Shell can't use descriptors 3-9
-    except OSError as e:
-      self.errfmt.Print('source %r failed: %s', path, posix.strerror(e.errno),
-                        span_id=cmd_val.arg_spids[1])
-      return 1
-
-    try:
-      line_reader = reader.FileLineReader(f, self.arena)
-      c_parser = self.parse_ctx.MakeOshParser(line_reader)
-
-      # A sourced module CAN have a new arguments array, but it always shares
-      # the same variable scope as the caller.  The caller could be at either a
-      # global or a local scope.
-      source_argv = argv[2:]
-      self.mem.PushSource(path, source_argv)
-      try:
-        status = self._EvalHelper(c_parser, source.SourcedFile(path, call_spid))
-      finally:
-        self.mem.PopSource(source_argv)
-
-      return status
-
-    except _ControlFlow as e:
-      if e.IsReturn():
-        return e.StatusCode()
-      else:
-        raise
-    finally:
-      f.close()
-
-  def _Exec(self, cmd_val):
-    # type: (cmd_value__Argv) -> int
-    # Apply redirects in this shell.  # NOTE: Redirects were processed earlier.
-    if len(cmd_val.argv) == 1:
-      return 0
-
-    environ = self.mem.GetExported()
-    cmd = cmd_val.argv[1]
-    argv0_path = self.search_path.CachedLookup(cmd)
-    if argv0_path is None:
-      self.errfmt.Print('exec: %r not found', cmd,
-                        span_id=cmd_val.arg_spids[1])
-      sys.exit(127)  # exec never returns
-
-    # shift off 'exec'
-    c2 = cmd_value.Argv(cmd_val.argv[1:], cmd_val.arg_spids[1:], cmd_val.block)
-    self.ext_prog.Exec(argv0_path, c2, environ)  # NEVER RETURNS
-    assert False, "This line should never be reached" # makes mypy happy
-
-  def _RunBuiltinAndRaise(self, builtin_id, cmd_val, fork_external):
-    # type: (builtin_t, cmd_value__Argv, bool) -> int
-    """
-    Raises:
-      args.UsageError
-    """
-    # Shift one arg.  Builtins don't need to know their own name.
-    argv = cmd_val.argv[1:]
-
-    # TODO: For now, hard-code the builtins that take a block, and pass them
-    # cmd_val.
-    # Later, we should give builtins signatures like this and check them:
-    #
-    # proc cd(argv Array[Str], b Block) {
-    #   do evaluate(b, locals, globals)
-    # }
-
-    # Most builtins dispatch with a dictionary
-    builtin_func = self.builtins.get(builtin_id)
-    if builtin_func is not None:
-      status = builtin_func.Run(cmd_val)
-
-    # Some builtins "belong" to the executor.
-
-    elif builtin_id == builtin_i.exec_:
-      status = self._Exec(cmd_val)  # may never return
-      # But if it returns, then we want to permanently apply the redirects
-      # associated with it.
-      self.fd_state.MakePermanent()
-
-    elif builtin_id == builtin_i.eval:
-      status = self._Eval(cmd_val)
-
-    elif builtin_id in (builtin_i.source, builtin_i.dot):
-      status = self._Source(cmd_val)
-
-    elif builtin_id == builtin_i.command:
-      # TODO: How do we handle fork_external?  It doesn't fit the common
-      # signature.  We also don't handle 'command local', etc.
-      b = builtin_pure.Command(self, self.procs, self.aliases,
-                               self.search_path)
-      status = b.Run(cmd_val, fork_external)
-
-    elif builtin_id == builtin_i.builtin:  # NOTE: uses early return style
-      if len(argv) == 0:
-        return 0  # this could be an error in strict mode?
-
-      name = cmd_val.argv[1]
-
-      # Run regular builtin or special builtin
-      to_run = consts.LookupNormalBuiltin(name)
-      if to_run == consts.NO_INDEX:
-        to_run = consts.LookupSpecialBuiltin(name)
-      if to_run == consts.NO_INDEX:
-        span_id = cmd_val.arg_spids[1]
-        if consts.LookupAssignBuiltin(name) != consts.NO_INDEX:
-          # NOTE: There's a similar restriction for 'command'
-          self.errfmt.Print("Can't run assignment builtin recursively",
-                            span_id=span_id)
-        else:
-          self.errfmt.Print("%r isn't a shell builtin", name, span_id=span_id)
-        return 1
-
-      cmd_val2 = cmd_value.Argv(cmd_val.argv[1:], cmd_val.arg_spids[1:],
-                                cmd_val.block)
-      status = self._RunBuiltinAndRaise(to_run, cmd_val2, fork_external)
-
-    else:
-      raise AssertionError('Unhandled builtin: %s' % builtin_id)
-
-    assert isinstance(status, int)
-    return status
-
-  def _RunBuiltin(self, builtin_id, cmd_val, fork_external):
-    # type: (builtin_t, cmd_value__Argv, bool) -> int
-    self.errfmt.PushLocation(cmd_val.arg_spids[0])
-    try:
-      status = self._RunBuiltinAndRaise(builtin_id, cmd_val, fork_external)
-    except args.UsageError as e:
-      arg0 = cmd_val.argv[0]
-      # fill in default location.  e.g. osh/state.py raises UsageError without
-      # span_id.
-      if e.span_id == runtime.NO_SPID:
-        e.span_id = self.errfmt.CurrentLocation()
-      # e.g. 'type' doesn't accept flag '-x'
-      self.errfmt.Print(e.msg, prefix='%r ' % arg0, span_id=e.span_id)
-      status = 2  # consistent error code for usage error
-    except KeyboardInterrupt:
-      if self.exec_opts.interactive():
-        print()  # newline after ^C
-        status = 130  # 128 + 2 for SIGINT
-      else:
-        # Abort a batch script
-        raise
-    finally:
-      # Flush stdout after running ANY builtin.  This is very important!
-      # Silence errors like we did from 'echo'.
-      try:
-        sys.stdout.flush()
-      except IOError as e:
-        pass
-
-      self.errfmt.PopLocation()
-
-    return status
-
   def _RunAssignBuiltin(self, cmd_val):
     # type: (cmd_value__Assign) -> int
-    """Run an assignment builtin.  Except blocks copied from _RunBuiltin above."""
-    self.errfmt.PushLocation(cmd_val.arg_spids[0])  # defult
-    builtin_func = self.builtins[cmd_val.builtin_id]  # must be there
+    """Run an assignment builtin.  Except blocks copied from RunBuiltin above."""
+    self.errfmt.PushLocation(cmd_val.arg_spids[0])  # default
+
+    builtin_func = self.assign_builtins.get(cmd_val.builtin_id)
+    if builtin_func is None:
+      self.errfmt.Print("Assignment builtin %r not configured",
+                        cmd_val.argv[0], span_id=cmd_val.arg_spids[0])
+      return 127
+
     try:
       status = builtin_func.Run(cmd_val)
-    except args.UsageError as e:  # Copied from _RunBuiltin
+    except args.UsageError as e:  # Copied from RunBuiltin
       arg0 = cmd_val.argv[0]
       if e.span_id == runtime.NO_SPID:  # fill in default location.
         e.span_id = self.errfmt.CurrentLocation()
@@ -554,7 +263,7 @@ class Executor(object):
       status = 2  # consistent error code for usage error
     except KeyboardInterrupt:
       if self.exec_opts.interactive():
-        print()  # newline after ^C
+        print('')  # newline after ^C
         status = 130  # 128 + 2 for SIGINT
       else:
         raise
@@ -615,75 +324,86 @@ class Executor(object):
           span_id = runtime.NO_SPID
 
       raise error.ErrExit(
-          'Exiting with status %d (%sPID %d)', status, reason, posix.getpid(),
+          'Exiting with status %d (%sPID %d)' % (status, reason, posix.getpid()),
           span_id=span_id, status=status)
 
-  def _EvalRedirect(self, n):
-    # type: (redir_t) -> redirect_t
+  def _EvalRedirect(self, r):
+    # type: (redir) -> redirect
 
-    UP_n = n
-    with tagswitch(n) as case:
-      if case(redir_e.Redir):
-        n = cast(redir__Redir, UP_n)
+    result = redirect(r.op.id, r.op.span_id, r.loc, None)
+
+    arg = r.arg
+    UP_arg = arg
+    with tagswitch(arg) as case:
+      if case(redir_param_e.Word):
+        arg_word = cast(compound_word, UP_arg)
 
         # note: needed for redirect like 'echo foo > x$LINENO'
-        self.mem.SetCurrentSpanId(n.op.span_id)
-        fd = consts.RedirDefaultFd(n.op.id) if n.fd == runtime.NO_SPID else n.fd
+        self.mem.SetCurrentSpanId(r.op.span_id)
 
-        redir_type = consts.RedirArgType(n.op.id)  # could be static in the LST?
+        redir_type = consts.RedirArgType(r.op.id)  # could be static in the LST?
 
         if redir_type == redir_arg_type_e.Path:
           # NOTES
           # - no globbing.  You can write to a file called '*.py'.
           # - set -o strict-array prevents joining by spaces
-          val = self.word_ev.EvalWordToString(n.arg_word)
+          val = self.word_ev.EvalWordToString(arg_word)
           filename = val.s
           if not filename:
             # Whether this is fatal depends on errexit.
             raise error.RedirectEval(
-                "Redirect filename can't be empty", word=n.arg_word)
+                "Redirect filename can't be empty", word=arg_word)
 
-          return redirect.Path(n.op.id, fd, filename, n.op.span_id)
+          result.arg = redirect_arg.Path(filename)
+          return result
 
-        elif redir_type == redir_arg_type_e.Desc:  # e.g. 1>&2
-          val = self.word_ev.EvalWordToString(n.arg_word)
+        elif redir_type == redir_arg_type_e.Desc:  # e.g. 1>&2, 1>&-, 1>&2-
+          val = self.word_ev.EvalWordToString(arg_word)
           t = val.s
           if not t:
             raise error.RedirectEval(
-                "Redirect descriptor can't be empty", word=n.arg_word)
+                "Redirect descriptor can't be empty", word=arg_word)
             return None
+
           try:
-            target_fd = int(t)
+            if t == '-':
+              result.arg = redirect_arg.CloseFd()
+            elif t[-1] == '-':
+              target_fd = int(t[:-1])
+              result.arg = redirect_arg.MoveFd(target_fd)
+            else:
+              result.arg = redirect_arg.CopyFd(int(t))
           except ValueError:
             raise error.RedirectEval(
-                "Redirect descriptor should look like an integer, got %s", val,
-                word=n.arg_word)
+                'Invalid descriptor %r.  Expected D, -, or D- where D is an '
+                'integer' % t, word=arg_word)
             return None
 
-          return redirect.FileDesc(n.op.id, fd, target_fd, n.op.span_id)
+          return result
 
         elif redir_type == redir_arg_type_e.Here:  # here word
-          val = self.word_ev.EvalWordToString(n.arg_word)
-          assert val.tag == value_e.Str, val
+          val = self.word_ev.EvalWordToString(arg_word)
+          assert val.tag_() == value_e.Str, val
           # NOTE: bash and mksh both add \n
-          return redirect.HereDoc(fd, val.s + '\n', n.op.span_id)
+          result.arg = redirect_arg.HereDoc(val.s + '\n')
+          return result
+
         else:
           raise AssertionError('Unknown redirect op')
 
-      elif case(redir_e.HereDoc):
-        n = cast(redir__HereDoc, UP_n)
-        fd = consts.RedirDefaultFd(n.op.id) if n.fd == runtime.NO_SPID else n.fd
-        # HACK: Wrap it in a word to evaluate.
-        w = compound_word(n.stdin_parts)
+      elif case(redir_param_e.MultiLine):
+        arg = cast(redir_param__MultiLine, UP_arg)
+        w = compound_word(arg.stdin_parts)  # HACK: Wrap it in a word to eval
         val = self.word_ev.EvalWordToString(w)
-        assert val.tag == value_e.Str, val
-        return redirect.HereDoc(fd, val.s, n.op.span_id)
+        assert val.tag_() == value_e.Str, val
+        result.arg = redirect_arg.HereDoc(val.s)
+        return result
 
       else:
         raise AssertionError('Unknown redirect type')
 
   def _EvalRedirects(self, node):
-    # type: (command_t) -> List[redirect_t]
+    # type: (command_t) -> List[redirect]
     """Evaluate redirect nodes to concrete objects.
 
     We have to do this every time, because you could have something like:
@@ -696,7 +416,7 @@ class Executor(object):
     Redirect() abstraction in process.py is useful.  It has a lot of methods.
 
     Raises:
-      RedirectEvalError
+      error.RedirectEval
     """
     # This is kind of lame because we have two switches over command_e: one for
     # redirects, and to evaluate the node.  But it's what you would do in C++ I
@@ -711,9 +431,6 @@ class Executor(object):
         redirects = node.redirects
       elif case(command_e.ShAssignment):
         node = cast(command__ShAssignment, UP_node)
-        redirects = node.redirects
-      elif case(command_e.DoGroup):
-        node = cast(command__DoGroup, UP_node)
         redirects = node.redirects
       elif case(command_e.BraceGroup):
         node = cast(command__BraceGroup, UP_node)
@@ -745,42 +462,12 @@ class Executor(object):
       else:
         raise AssertionError()
 
-    result = []  # type: List[redirect_t]
+    result = []  # type: List[redirect]
     for redir in redirects:
       result.append(self._EvalRedirect(redir))
     return result
 
-  def _MakeProcess(self, node, parent_pipeline=None, inherit_errexit=True):
-    # type: (command_t, process.Pipeline, bool) -> process.Process
-    """
-    Assume we will run the node in another process.  Return a process.
-    """
-
-    UP_node = node
-    if UP_node.tag_() == command_e.ControlFlow:
-      node = cast(command__ControlFlow, UP_node)
-      # Pipeline or subshells with control flow are invalid, e.g.:
-      # - break | less
-      # - continue | less
-      # - ( return )
-      # NOTE: This could be done at parse time too.
-      e_die('Invalid control flow %r in pipeline / subshell / background',
-            node.token.val, token=node.token)
-
-    # NOTE: If ErrExit(), we could be verbose about subprogram errors?  This
-    # only really matters when executing 'exit 42', because the child shell
-    # inherits errexit and will be verbose.  Other notes:
-    #
-    # - We might want errors to fit on a single line so they don't get
-    # interleaved.
-    # - We could turn the `exit` builtin into a FatalRuntimeError exception and
-    # get this check for "free".
-    thunk = process.SubProgramThunk(self, node,
-                                    inherit_errexit=inherit_errexit)
-    p = process.Process(thunk, self.job_state, parent_pipeline=parent_pipeline)
-    return p
-
-  def _RunSimpleCommand(self, cmd_val, fork_external):
+  def _RunSimpleCommand(self, cmd_val, do_fork):
     # type: (cmd_value_t, bool) -> int
     """Private interface to run a simple command (including assignment)."""
 
@@ -788,7 +475,7 @@ class Executor(object):
     with tagswitch(UP_cmd_val) as case:
       if case(cmd_value_e.Argv):
         cmd_val = cast(cmd_value__Argv, UP_cmd_val)
-        return self.RunSimpleCommand(cmd_val, fork_external)
+        return self.shell_ex.RunSimpleCommand(cmd_val, do_fork)
 
       elif case(cmd_value_e.Assign):
         cmd_val = cast(cmd_value__Assign, UP_cmd_val)
@@ -796,173 +483,6 @@ class Executor(object):
 
       else:
         raise AssertionError()
-
-  def RunSimpleCommand(self, cmd_val, fork_external, funcs=True):
-    # type: (cmd_value__Argv, bool, bool) -> int
-    """Public interface to run a simple command (excluding assignment)
-
-    Args:
-      fork_external: for subshell ( ls / ) or ( command ls / )
-    """
-    assert cmd_val.tag == cmd_value_e.Argv
-
-    argv = cmd_val.argv
-    span_id = cmd_val.arg_spids[0] if cmd_val.arg_spids else runtime.NO_SPID
-
-    # This happens when you write "$@" but have no arguments.
-    if len(argv) == 0:
-      if self.exec_opts.strict_argv():
-        e_die("Command evaluated to an empty argv array",
-              span_id=span_id)
-      else:
-        return 0  # status 0, or skip it?
-
-    arg0 = argv[0]
-
-    builtin_id = consts.LookupAssignBuiltin(arg0)
-    if builtin_id != consts.NO_INDEX:
-      # command readonly is disallowed, for technical reasons.  Could relax it
-      # later.
-      self.errfmt.Print("Can't run assignment builtin recursively",
-                        span_id=span_id)
-      return 1
-
-    builtin_id = consts.LookupSpecialBuiltin(arg0)
-    if builtin_id != consts.NO_INDEX:
-      status = self._RunBuiltin(builtin_id, cmd_val, fork_external)
-      # TODO: Enable this and fix spec test failures.
-      # Also update _SPECIAL_BUILTINS in osh/builtin.py.
-      #if status != 0:
-      #  e_die('special builtin failed', status=status)
-      return status
-
-    # Builtins like 'true' can be redefined as functions.
-    if funcs:
-      # TODO: if shopt -s namespaces, then look up in current namespace FIRST.
-      #
-      # Then fallback on self.procs, which should be renamed self.procs?
-      #
-      # honestly there is no real chance of colllision because
-      # foo-bar() {} can't be accessed anyway
-      # functions can have hyphens, but variables can't
-
-      func_node = self.procs.get(arg0)
-      if func_node is not None:
-        if (self.exec_opts.strict_errexit() and 
-            self.mutable_opts.errexit.SpidIfDisabled() != runtime.NO_SPID):
-          # NOTE: This would be checked below, but this gives a better error
-          # message.
-          e_die("can't disable errexit running a function. "
-                "Maybe wrap the function in a process with the at-splice "
-                "pattern.", span_id=span_id)
-
-        # NOTE: Functions could call 'exit 42' directly, etc.
-        status = self._RunProc(func_node, argv[1:])
-        return status
-
-      # TODO:
-      # look up arg0 in global namespace?  And see if the type is value.Obj
-      # And it's a proc?
-      # isinstance(val.obj, objects.Proc)
-      UP_val = self.mem.GetVar(arg0)
-
-      if mylib.PYTHON:  # Not reusing CPython objects
-        if UP_val.tag == value_e.Obj:
-          val = cast(value__Obj, UP_val)
-          if isinstance(val.obj, objects.Proc):
-            status = self._RunOilProc(val.obj, argv[1:])
-            return status
-
-    builtin_id = consts.LookupNormalBuiltin(arg0)
-
-    if builtin_id != consts.NO_INDEX:
-      return self._RunBuiltin(builtin_id, cmd_val, fork_external)
-
-    environ = self.mem.GetExported()  # Include temporary variables
-
-    if cmd_val.block:
-      e_die('Unexpected block passed to external command %r', arg0,
-            span_id=cmd_val.block.spids[0])
-
-    # Resolve argv[0] BEFORE forking.
-    argv0_path = self.search_path.CachedLookup(arg0)
-    if argv0_path is None:
-      self.errfmt.Print('%r not found', arg0, span_id=span_id)
-      return 127
-
-    if fork_external:
-      thunk = process.ExternalThunk(self.ext_prog, argv0_path, cmd_val, environ)
-      p = process.Process(thunk, self.job_state)
-      status = p.Run(self.waiter)
-      return status
-
-    self.ext_prog.Exec(argv0_path, cmd_val, environ)  # NEVER RETURNS
-    assert False, "This line should never be reached" # makes mypy happy
-
-  def _RunPipeline(self, node):
-    # type: (command__Pipeline) -> int
-    pi = process.Pipeline()
-
-    # First n-1 processes (which is empty when n == 1)
-    n = len(node.children)
-    for i in xrange(n - 1):
-      p = self._MakeProcess(node.children[i], parent_pipeline=pi)
-      pi.Add(p)
-
-    # Last piece of code is in THIS PROCESS.  'echo foo | read line; echo $line'
-    pi.AddLast((self, node.children[n-1]))
-
-    pipe_status = pi.Run(self.waiter, self.fd_state)
-    self.mem.SetPipeStatus(pipe_status)
-
-    if self.exec_opts.pipefail():
-      # The status is that of the last command that is non-zero.
-      status = 0
-      for st in pipe_status:
-        if st != 0:
-          status = st
-    else:
-      status = pipe_status[-1]  # status of last one is pipeline status
-
-    return status
-
-  def _RunJobInBackground(self, node):
-    # type: (command_t) -> int
-    # Special case for pipeline.  There is some evidence here:
-    # https://www.gnu.org/software/libc/manual/html_node/Launching-Jobs.html#Launching-Jobs
-    #
-    #  "You can either make all the processes in the process group be children
-    #  of the shell process, or you can make one process in group be the
-    #  ancestor of all the other processes in that group. The sample shell
-    #  program presented in this chapter uses the first approach because it
-    #  makes bookkeeping somewhat simpler."
-    UP_node = node
-
-    if UP_node.tag_() == command_e.Pipeline:
-      node = cast(command__Pipeline, UP_node)
-      pi = process.Pipeline()
-      for child in node.children:
-        pi.Add(self._MakeProcess(child, parent_pipeline=pi))
-
-      pi.Start(self.waiter)
-      last_pid = pi.LastPid()
-      self.mem.last_bg_pid = last_pid   # for $!
-
-      job_id = self.job_state.AddJob(pi)  # show in 'jobs' list
-      log('[%%%d] Started Pipeline with PID %d', job_id, last_pid)
-
-    else:
-      # Problem: to get the 'set -b' behavior of immediate notifications, we
-      # have to register SIGCHLD.  But then that introduces race conditions.
-      # If we haven't called Register yet, then we won't know who to notify.
-
-      #log('job state %s', self.job_state)
-      p = self._MakeProcess(node)
-      pid = p.Start()
-      self.mem.last_bg_pid = pid  # for $!
-      job_id = self.job_state.AddJob(p)  # show in 'jobs' list
-      log('[%%%d] Started PID %d', job_id, pid)
-    return 0
 
   def _EvalTempEnv(self, more_env, flags):
     # type: (List[env_pair], int) -> None
@@ -974,8 +494,8 @@ class Executor(object):
       self.mem.SetVar(lvalue.Named(e_pair.name), val, scope_e.LocalOnly,
                       flags=flags)
 
-  def _Dispatch(self, node, fork_external):
-    # type: (command_t, bool) -> Tuple[int, bool]
+  def _Dispatch(self, node):
+    # type: (command_t) -> Tuple[int, bool]
     # If we call RunCommandSub in a recursive call to the executor, this will
     # be set true (if strict-errexit is false).  But it only lasts for one
     # command.
@@ -1032,22 +552,22 @@ class Executor(object):
         # with set-o verbose?
         self.tracer.OnSimpleCommand(argv)
 
-        # NOTE: RunSimpleCommand never returns when fork_external=False!
+        # NOTE: RunSimpleCommand never returns when do_fork=False!
         if len(node.more_env):  # I think this guard is necessary?
           is_other_special = False  # TODO: There are other special builtins too!
           if cmd_val.tag_() == cmd_value_e.Assign or is_other_special:
             # Special builtins have their temp env persisted.
             self._EvalTempEnv(node.more_env, 0)
-            status = self._RunSimpleCommand(cmd_val, fork_external)
+            status = self._RunSimpleCommand(cmd_val, node.do_fork)
           else:
             self.mem.PushTemp()
             try:
               self._EvalTempEnv(node.more_env, state.SetExport)
-              status = self._RunSimpleCommand(cmd_val, fork_external)
+              status = self._RunSimpleCommand(cmd_val, node.do_fork)
             finally:
               self.mem.PopTemp()
         else:
-          status = self._RunSimpleCommand(cmd_val, fork_external)
+          status = self._RunSimpleCommand(cmd_val, node.do_fork)
 
       elif case(command_e.ExpandedAlias):
         node = cast(command__ExpandedAlias, UP_node)
@@ -1073,7 +593,7 @@ class Executor(object):
         if node.terminator.id == Id.Op_Semi:
           status = self._Execute(node.child)
         else:
-          status = self._RunJobInBackground(node.child)
+          status = self.shell_ex.RunBackgroundJob(node.child)
 
       elif case(command_e.Pipeline):
         node = cast(command__Pipeline, UP_node)
@@ -1084,7 +604,7 @@ class Executor(object):
         if node.negated:
           self._PushErrExit(node.spids[0])  # ! spid
           try:
-            status2 = self._RunPipeline(node)
+            status2 = self.shell_ex.RunPipeline(node)
           finally:
             self._PopErrExit()
 
@@ -1092,14 +612,12 @@ class Executor(object):
           check_errexit = False
           status = 1 if status2 == 0 else 0
         else:
-          status = self._RunPipeline(node)
+          status = self.shell_ex.RunPipeline(node)
 
       elif case(command_e.Subshell):
         node = cast(command__Subshell, UP_node)
         check_errexit = True
-        # This makes sure we don't waste a process if we'd launch one anyway.
-        p = self._MakeProcess(node.command_list)
-        status = p.Run(self.waiter)
+        status = self.shell_ex.RunSubshell(node)
 
       elif case(command_e.DBracket):
         node = cast(command__DBracket, UP_node)
@@ -1107,7 +625,7 @@ class Executor(object):
         self.mem.SetCurrentSpanId(span_id)
 
         check_errexit = True
-        result = self.bool_ev.Eval(node.expr)
+        result = self.bool_ev.EvalB(node.expr)
         status = 0 if result else 1
 
       elif case(command_e.DParen):
@@ -1141,7 +659,7 @@ class Executor(object):
             # Note: there's only one LHS
             vd_lval = lvalue.Named(node.lhs[0].name.val)  # type: lvalue_t
             py_val = self.expr_ev.EvalExpr(node.rhs)
-            val = _PyObjectToVal(py_val)
+            val = _PyObjectToVal(py_val)  # type: value_t
 
             self.mem.SetVar(vd_lval, val, scope_e.LocalOnly, 
                             flags=_PackFlags(Id.KW_Const, state.SetReadOnly))
@@ -1203,8 +721,6 @@ class Executor(object):
             py_vals = []
             if len(node.lhs) == 1:  # TODO: Optimize this common case (but measure)
               # See ShAssignment
-              # EvalLhs
-              # EvalLhsAndLookup for +=
               lval_ = self.expr_ev.EvalPlaceExpr(node.lhs[0]) # type: lvalue_t
 
               lvals_.append(lval_)
@@ -1259,15 +775,17 @@ class Executor(object):
 
         lookup_mode = scope_e.Dynamic
         for pair in node.pairs:
+          spid = pair.spids[0]  # Source location for tracing
           # Use the spid of each pair.
-          self.mem.SetCurrentSpanId(pair.spids[0])
+          self.mem.SetCurrentSpanId(spid)
 
           if pair.op == assign_op_e.PlusEqual:
             assert pair.rhs, pair.rhs  # I don't think a+= is valid?
             val = self.word_ev.EvalRhsWord(pair.rhs)
-            old_val, lval = sh_expr_eval.EvalLhsAndLookup(
-                pair.lhs, self.arith_ev, self.mem, self.exec_opts,
-                lookup_mode=lookup_mode)
+
+            lval = self.arith_ev.EvalShellLhs(pair.lhs, spid, lookup_mode)
+            old_val = sh_expr_eval.OldValue(lval, self.mem, self.exec_opts)
+
             UP_old_val = old_val
             UP_val = val
 
@@ -1302,9 +820,7 @@ class Executor(object):
               val = value.MaybeStrArray(strs)
 
           else:  # plain assignment
-            spid = pair.spids[0]  # Source location for tracing
-            lval = sh_expr_eval.EvalLhs(pair.lhs, self.arith_ev, self.mem, spid,
-                                        lookup_mode)
+            lval = self.arith_ev.EvalShellLhs(pair.lhs, spid, lookup_mode)
 
             # RHS can be a string or array.
             if pair.rhs:
@@ -1342,8 +858,28 @@ class Executor(object):
 
       elif case(command_e.Return):
         node = cast(command__Return, UP_node)
-        val = self.expr_ev.EvalExpr(node.e)
-        raise _ControlFlow(node.keyword, val)
+        obj = self.expr_ev.EvalExpr(node.e)
+
+        if 0:
+          val = _PyObjectToVal(obj)
+
+          status_code = -1
+          UP_val = val
+          with tagswitch(val) as case:
+            if case(value_e.Int):
+              val = cast(value__Int, UP_val)
+              status_code = val.i
+            elif case(value_e.Str):
+              val = cast(value__Str, UP_val)
+              try:
+                status_code = int(val.s)
+              except ValueError:
+                e_die('Invalid return value %r', val.s, token=node.keyword)
+            else:
+              e_die('Expected integer return value, got %r', val,
+                    token=node.keyword)
+
+        raise _ControlFlow(node.keyword, obj)
 
       elif case(command_e.Expr):
         node = cast(command__Expr, UP_node)
@@ -1367,13 +903,12 @@ class Executor(object):
         tok = node.token
 
         if node.arg_word:  # Evaluate the argument
-          val = self.word_ev.EvalWordToString(node.arg_word)
-          assert val.tag == value_e.Str
+          str_val = self.word_ev.EvalWordToString(node.arg_word)
           try:
-            arg = int(val.s)  # They all take integers
+            arg = int(str_val.s)  # They all take integers
           except ValueError:
             e_die('%r expected a number, got %r',
-                node.token.val, val.s, word=node.arg_word)
+                node.token.val, str_val.s, word=node.arg_word)
         else:
           if tok.id in (Id.ControlFlow_Exit, Id.ControlFlow_Return):
             arg = self.mem.LastStatus()
@@ -1617,7 +1152,7 @@ class Executor(object):
         node = cast(command__Proc, UP_node)
         if mylib.PYTHON:
           UP_proc_sig = node.sig
-          if UP_proc_sig.tag == proc_sig_e.Closed:
+          if UP_proc_sig.tag_() == proc_sig_e.Closed:
             proc_sig = cast(proc_sig__Closed, UP_proc_sig)
             defaults = [None] * len(proc_sig.params)
             for i, param in enumerate(proc_sig.params):
@@ -1680,8 +1215,8 @@ class Executor(object):
 
       elif case(command_e.Case):
         node = cast(command__Case, UP_node)
-        val = self.word_ev.EvalWordToString(node.to_match)
-        to_match = val.s
+        str_val = self.word_ev.EvalWordToString(node.to_match)
+        to_match = str_val.s
 
         status = 0  # If there are no arms, it should be zero?
         done = False
@@ -1713,32 +1248,23 @@ class Executor(object):
         # $'\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS'
         # "A trailing newline is added when the format string is displayed."
 
-        start_t = time.time()  # calls gettimeofday() under the hood
-        start_u = resource.getrusage(resource.RUSAGE_SELF)
+        s_real, s_user, s_sys = passwd.Time()
         status = self._Execute(node.pipeline)
-
-        end_t = time.time()
-        end_u = resource.getrusage(resource.RUSAGE_SELF)
-
-        real = end_t - start_t
-        user = end_u.ru_utime - start_u.ru_utime
-        sys_ = end_u.ru_stime - start_u.ru_stime
-        libc.print_time(real, user, sys_)
+        e_real, e_user, e_sys = passwd.Time()
+        # note: mycpp doesn't support %.3f
+        libc.print_time(e_real - s_real, e_user - s_user, e_sys - s_sys)
 
       else:
         raise NotImplementedError(node.tag_())
 
     return status, check_errexit
 
-  def _Execute(self, node, fork_external=True):
-    # type: (command_t, bool) -> int
+  def _Execute(self, node):
+    # type: (command_t) -> int
     """Apply redirects, call _Dispatch(), and performs the errexit check.
 
     Args:
       node: syntax_asdl.command_t
-      fork_external: if we get a SimpleCommand that is an external command,
-        should we fork first?  This is disabled in the context of a pipeline
-        process and a subshell.
     """
     # See core/builtin.py for the Python signal handler that appends to this
     # list.
@@ -1764,12 +1290,13 @@ class Executor(object):
     # TODO: Speed this up with some kind of bit mask?
     if node.tag_() in (
         command_e.NoOp, command_e.ControlFlow, command_e.Pipeline,
-        command_e.AndOr, command_e.CommandList, command_e.Sentence,
+        command_e.AndOr, command_e.CommandList, command_e.DoGroup,
+        command_e.Sentence,
         command_e.TimeBlock, command_e.ShFunction, command_e.VarDecl,
         command_e.PlaceMutation, command_e.OilCondition, command_e.OilForIn,
         command_e.Proc, command_e.Func, command_e.Return, command_e.Expr,
         command_e.BareDecl):
-      redirects = []  # type: List[redirect_t]
+      redirects = []  # type: List[redirect]
     else:
       try:
         redirects = self._EvalRedirects(node)
@@ -1783,17 +1310,17 @@ class Executor(object):
       status = 1
 
     elif len(redirects):
-      if self.fd_state.Push(redirects, self.waiter):
+      if self.shell_ex.PushRedirects(redirects):
         try:
-          status, check_errexit = self._Dispatch(node, fork_external)
+          status, check_errexit = self._Dispatch(node)
         finally:
-          self.fd_state.Pop()
+          self.shell_ex.PopRedirects()
         #log('_dispatch returned %d', status)
       else:  # Error applying redirects, e.g. bad file descriptor.
         status = 1
 
     else:  # No redirects
-      status, check_errexit = self._Dispatch(node, fork_external)
+      status, check_errexit = self._Dispatch(node)
 
     self.mem.SetLastStatus(status)
 
@@ -1815,7 +1342,8 @@ class Executor(object):
     # type: (List[command_t]) -> int
     status = 0  # for empty list
     for child in children:
-      status = self._Execute(child)  # last status wins
+      # last status wins
+      status = self._Execute(child)
     return status
 
   def LastStatus(self):
@@ -1823,32 +1351,92 @@ class Executor(object):
     """For main_loop.py to determine the exit code of the shell itself."""
     return self.mem.LastStatus()
 
-  def ExecuteAndCatch(self, node, fork_external=True):
+  def _NoForkLast(self, node):
+    # type: (command_t) -> None
+
+    if 0:
+      log('optimizing')
+      node.PrettyPrint(sys.stderr)
+      log('')
+
+    UP_node = node
+    with tagswitch(node) as case:
+      if case(command_e.Simple):
+        node = cast(command__Simple, UP_node)
+        node.do_fork = False
+        if 0:
+          log('Simple optimized')
+
+      elif case(command_e.Pipeline):
+        node = cast(command__Pipeline, UP_node)
+        if not node.negated:
+          #log ('pipe')
+          self._NoForkLast(node.children[-1])
+
+      elif case(command_e.Sentence):
+        node = cast(command__Sentence, UP_node)
+        self._NoForkLast(node.child)
+
+      elif case(command_e.CommandList):
+        # Subshells start with CommandList, even if there's only one.
+        node = cast(command__CommandList, UP_node)
+        self._NoForkLast(node.children[-1])
+
+      elif case(command_e.BraceGroup):
+        # TODO: What about redirects?
+        node = cast(command__BraceGroup, UP_node)
+        self._NoForkLast(node.children[-1])
+
+  def _RemoveSubshells(self, node):
+    # type: (command_t) -> command_t
+    """
+    Eliminate redundant subshells like ( echo hi ) | wc -l etc.
+    """
+    UP_node = node
+    with tagswitch(node) as case:
+      if case(command_e.Subshell):
+        node = cast(command__Subshell, UP_node)
+        if len(node.redirects) == 0:
+          # Note: technically we could optimize this into BraceGroup with
+          # redirects.  Some shells appear to do that.
+          if 0:
+            log('removing subshell')
+          # Optimize ( ( date ) ) etc.
+          return self._RemoveSubshells(node.child)
+    return node
+
+  def ExecuteAndCatch(self, node, optimize=False):
     # type: (command_t, bool) -> Tuple[bool, bool]
     """Execute a subprogram, handling _ControlFlow and fatal exceptions.
 
     Args:
       node: LST subtree
-      fork_external: whether external commands require forking
+      optimize: Whether to exec the last process rather than fork/exec
 
     Returns:
       TODO: use enum 'why' instead of the 2 booleans
 
-    Used by main_loop.py.
-
-    Also:
+    Used by
+    - main_loop.py.
     - SubProgramThunk for pipelines, subshell, command sub, process sub
     - TODO: Signals besides EXIT trap
 
-    Most other clients call _Execute():
-    - _Source() for source builtin
-    - _Eval() for eval builtin
-    - _RunProc() for function call
+    Note: To do what optimize does, dash has EV_EXIT flag and yash has a
+    finally_exit boolean.  We use a different algorithm.
     """
+    if optimize:
+      node = self._RemoveSubshells(node)
+      self._NoForkLast(node)  # turn the last ones into exec
+
+    if 0:
+      log('after opt:')
+      node.PrettyPrint()
+      log('')
+
     is_return = False
     is_fatal = False
     try:
-      status = self._Execute(node, fork_external=fork_external)
+      status = self._Execute(node)
     except _ControlFlow as e:
       # Return at top level is OK, unlike in bash.
       if e.IsReturn():
@@ -1874,7 +1462,7 @@ class Executor(object):
 
       ui.PrettyPrintError(e, self.arena, prefix='fatal: ')
       is_fatal = True
-      status = e.exit_status if e.exit_status is not None else 1
+      status = e.ExitStatus()
 
     self.dumper.MaybeDump(status)
     self.mem.SetLastStatus(status)
@@ -1897,117 +1485,7 @@ class Executor(object):
     else:
       return False  # nothing run, don't use its status
 
-  def RunCommandSub(self, node):
-    # type: (command_t) -> str
-    p = self._MakeProcess(node,
-                          inherit_errexit=self.exec_opts.inherit_errexit())
-
-    r, w = posix.pipe()
-    p.AddStateChange(process.StdoutToPipe(r, w))
-    _ = p.Start()
-    #log('Command sub started %d', pid)
-
-    chunks = []  # type: List[str]
-    posix.close(w)  # not going to write
-    while True:
-      byte_str = posix.read(r, 4096)
-      if len(byte_str) == 0:
-        break
-      chunks.append(byte_str)
-    posix.close(r)
-
-    status = p.Wait(self.waiter)
-
-    # OSH has the concept of aborting in the middle of a WORD.  We're not
-    # waiting until the command is over!
-    if self.exec_opts.more_errexit():
-      if self.exec_opts.errexit() and status != 0:
-        raise error.ErrExit(
-            'Command sub exited with status %d (%r)', status,
-            NewStr(command_str(node.tag_())))
-    else:
-      # Set a flag so we check errexit at the same time as bash.  Example:
-      #
-      # a=$(false)
-      # echo foo  # no matter what comes here, the flag is reset
-      #
-      # Set ONLY until this command node has finished executing.
-      self.check_command_sub_status = True
-      self.mem.SetLastStatus(status)
-
-    # Runtime errors test case: # $("echo foo > $@")
-    # Why rstrip()?
-    # https://unix.stackexchange.com/questions/17747/why-does-shell-command-substitution-gobble-up-a-trailing-newline-char
-    return ''.join(chunks).rstrip('\n')
-
-  def RunProcessSub(self, node, op_id):
-    # type: (command_t, Id_t) -> str
-    """Process sub creates a forks a process connected to a pipe.
-
-    The pipe is typically passed to another process via a /dev/fd/$FD path.
-
-    TODO:
-
-    sane-proc-sub:
-    - wait for all the words
-
-    Otherwise, set $!  (mem.last_bg_pid)
-
-    strict-proc-sub:
-    - Don't allow it anywhere except SimpleCommand, any redirect, or
-    ShAssignment?  And maybe not even assignment?
-
-    Should you put return codes in @PROCESS_SUB_STATUS?  You need two of them.
-    """
-    p = self._MakeProcess(node)
-
-    r, w = posix.pipe()
-
-    if op_id == Id.Left_ProcSubIn:
-      # Example: cat < <(head foo.txt)
-      #
-      # The head process should write its stdout to a pipe.
-      redir = process.StdoutToPipe(r, w) # type: process.ChildStateChange
-
-    elif op_id == Id.Left_ProcSubOut:
-      # Example: head foo.txt > >(tac)
-      #
-      # The tac process should read its stdin from a pipe.
-      #
-      # NOTE: This appears to hang in bash?  At least when done interactively.
-      # It doesn't work at all in osh interactively?
-      redir = process.StdinFromPipe(r, w)
-
-    else:
-      raise AssertionError()
-
-    p.AddStateChange(redir)
-
-    # Fork, letting the child inherit the pipe file descriptors.
-    pid = p.Start()
-
-    # After forking, close the end of the pipe we're not using.
-    if op_id == Id.Left_ProcSubIn:
-      posix.close(w)
-    elif op_id == Id.Left_ProcSubOut:
-      posix.close(r)
-    else:
-      raise AssertionError()
-
-    # NOTE: Like bash, we never actually wait on it!
-    # TODO: At least set $! ?
-
-    # Is /dev Linux-specific?
-    if op_id == Id.Left_ProcSubIn:
-      return '/dev/fd/%d' % r
-
-    elif op_id == Id.Left_ProcSubOut:
-      return '/dev/fd/%d' % w
-
-    else:
-      raise AssertionError()
-
-  def _RunProc(self, func_node, argv):
+  def RunProc(self, func_node, argv):
     # type: (command__ShFunction, List[str]) -> int
     """Run a shell "functions".
 
@@ -2033,7 +1511,7 @@ class Executor(object):
 
     return status
 
-  def _RunOilProc(self, proc, argv):
+  def RunOilProc(self, proc, argv):
     # type: (objects.Proc, List[str]) -> int
     """
     Run an oil proc foo { } or proc foo(x, y, @names) { }
@@ -2212,7 +1690,8 @@ class Executor(object):
     foo = {a:1}
 
     """
-    status = None  # type: int
+    status = 0
+    namespace_ = None  # type: Dict[str, cell]
     self.mem.PushTemp()  # So variables don't conflict
     try:
       self._Execute(block)  # can raise FatalRuntimeError, etc.
@@ -2222,7 +1701,7 @@ class Executor(object):
       else:
         raise
     finally:
-      namespace = self.mem.TopNamespace() # type: Dict[str, cell]
+      namespace_ = self.mem.TopNamespace()
       self.mem.PopTemp()
     # This is the thing on self.mem?
     # Filter out everything beginning with _ ?
@@ -2233,16 +1712,16 @@ class Executor(object):
     # because it's an int and values of the namespace dict should be
     # cells, so I've commented it out.
     #namespace['_returned'] = status
-    return namespace
+    return namespace_
 
   def RunFuncForCompletion(self, func_node, argv):
     # type: (command__ShFunction, List[str]) -> int
     # TODO: Change this to run Oil procs and funcs too
     try:
-      status = self._RunProc(func_node, argv)
+      status = self.RunProc(func_node, argv)
     except error.FatalRuntime as e:
       ui.PrettyPrintError(e, self.arena)
-      status = e.exit_status if e.exit_status is not None else 1
+      status = e.ExitStatus()
     except _ControlFlow as e:
       # shouldn't be able to exit the shell from a completion hook!
       # TODO: Avoid overwriting the prompt!

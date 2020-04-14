@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# echo, read
-# later: perhaps mapfile, etc.
+# echo, read, mapfile
+# TODO mapfile options: -c, -C, -u, etc.
 
 #### echo dashes
 echo -
@@ -58,7 +58,7 @@ echo -ez 'abc\n'
 ## stdout-json: "-ez abc\\n\n"
 ## OK dash/mksh/zsh stdout-json: "-ez abc\n\n"
 
-#### echo -e with embedded newline 
+#### echo -e with embedded newline
 flags='-e'
 case $SH in dash) flags='' ;; esac
 
@@ -96,16 +96,15 @@ echo -e '\n\r\t\v'
 #### \0
 echo -e 'ab\0cd'
 ## stdout-json: "ab\u0000cd\n"
-# dash truncates it
-## BUG dash stdout-json: "-e ab\n"
+## N-I dash stdout-json: "-e ab\u0000cd\n"
 
 #### \c stops processing input
 flags='-e'
 case $SH in dash) flags='' ;; esac
 
-echo $flags xy  'ab\cde'  'ab\cde'
+echo $flags xy  'ab\cde'  'zzz'
 ## stdout-json: "xy ab"
-## N-I mksh stdout-json: "xy abde abde"
+## N-I mksh stdout-json: "xy abde zzz"
 
 #### echo -e with hex escape
 echo -e 'abcd\x65f'
@@ -149,7 +148,7 @@ echo -en '\03777' | od -A n -t x1 | sed 's/ \+/ /g'
 echo -en '\04000' | od -A n -t x1 | sed 's/ \+/ /g'
 ## stdout-json: " 00 30\n"
 ## BUG ash stdout-json: " 20 30 30\n"
-## N-I dash stdout-json: " 2d 65 6e 20\n"
+## N-I dash stdout-json: " 2d 65 6e 20 00 30 0a\n"
 
 #### \0777 is out of range
 flags='-en'
@@ -201,8 +200,7 @@ case $SH in dash) flags='-n' ;; esac
 
 echo $flags '\0' '\1' '\8' | od -A n -c | sed 's/ \+/ /g'
 ## stdout-json: " \\0 \\ 1 \\ 8\n"
-## BUG dash stdout-json: " 001 \\ 8\n"
-## BUG ash stdout-json: " \\0 001 \\ 8\n"
+## BUG dash/ash stdout-json: " \\0 001 \\ 8\n"
 
 #### Read builtin
 # NOTE: there are TABS below
@@ -218,8 +216,31 @@ echo "[$x]"
 echo -n '' > $TMP/empty.txt
 read x < $TMP/empty.txt
 argv.py "status=$?" "$x"
-## stdout: ['status=1', '']
+
+# No variable name, behaves the same
+read < $TMP/empty.txt
+argv.py "status=$?" "$REPLY"
+
+## STDOUT:
+['status=1', '']
+['status=1', '']
+## END
+## OK dash STDOUT:
+['status=1', '']
+['status=2', '']
+## END
 ## status: 0
+
+
+#### read with zero args
+echo | read
+echo status=$?
+## STDOUT:
+status=0
+## END
+## BUG dash STDOUT:
+status=2
+## END
 
 #### Read builtin with no newline.
 # This is odd because the variable is populated successfully.  OSH/Oil might
@@ -236,7 +257,6 @@ FG
 EOF
 echo "[$x/$y/$z]"
 ## stdout: [A/B/C D E]
-## BUG dash stdout: [A/B/C D E ]
 ## status: 0
 
 #### Read builtin with not enough variables
@@ -433,3 +453,218 @@ done | { read -$FLAG 3; echo $REPLY; }
 
 # zsh appears to hang with -k
 ## N-I zsh stdout-json: ""
+
+#### read -d : (colon-separated records)
+printf a,b,c:d,e,f:g,h,i | {
+  IFS=,
+  read -d : v1
+  echo "v1=$v1"
+  read -d : v1 v2
+  echo "v1=$v1 v2=$v2"
+  read -d : v1 v2 v3
+  echo "v1=$v1 v2=$v2 v3=$v3"
+}
+## STDOUT:
+v1=a,b,c
+v1=d v2=e,f
+v1=g v2=h v3=i
+## END
+## N-I dash STDOUT:
+v1=
+v1= v2=
+v1= v2= v3=
+## END
+## BUG ash STDOUT:
+v1=a,b,c
+v1=d,e,f v2=
+v1=g,h,i v2= v3=
+## END
+
+#### read -d '' (null-separated records)
+printf 'a,b,c\0d,e,f\0g,h,i' | {
+  IFS=,
+  read -d '' v1
+  echo "v1=$v1"
+  read -d '' v1 v2
+  echo "v1=$v1 v2=$v2"
+  read -d '' v1 v2 v3
+  echo "v1=$v1 v2=$v2 v3=$v3"
+}
+## STDOUT:
+v1=a,b,c
+v1=d v2=e,f
+v1=g v2=h v3=i
+## END
+## N-I dash STDOUT:
+v1=
+v1= v2=
+v1= v2= v3=
+## END
+## BUG ash STDOUT:
+v1=a,b,cd,e,fg,h,i
+v1= v2=
+v1= v2= v3=
+## END
+
+#### read -rd
+read -rd '' var <<EOF
+foo
+bar
+EOF
+echo "$var"
+## STDOUT:
+foo
+bar
+## END
+## N-I dash stdout-json: "\n"
+
+#### read -d when there's no delimiter
+{ read -d : part
+  echo $part $?
+  read -d : part
+  echo $part $?
+} <<EOF
+foo:bar
+EOF
+## STDOUT:
+foo 0
+bar 1
+## END
+## N-I dash STDOUT:
+2
+2
+## END
+
+#### mapfile
+type mapfile >/dev/null 2>&1 || exit 0
+printf '%s\n' {1..5..2} | {
+  mapfile
+  echo "n=${#MAPFILE[@]}"
+  printf '[%s]\n' "${MAPFILE[@]}"
+}
+## STDOUT:
+n=3
+[1
+]
+[3
+]
+[5
+]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### readarray (synonym for mapfile)
+type readarray >/dev/null 2>&1 || exit 0
+printf '%s\n' {1..5..2} | {
+  readarray
+  echo "n=${#MAPFILE[@]}"
+  printf '[%s]\n' "${MAPFILE[@]}"
+}
+## STDOUT:
+n=3
+[1
+]
+[3
+]
+[5
+]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### mapfile (array name): arr
+type mapfile >/dev/null 2>&1 || exit 0
+printf '%s\n' {1..5..2} | {
+  mapfile arr
+  echo "n=${#arr[@]}"
+  printf '[%s]\n' "${arr[@]}"
+}
+## STDOUT:
+n=3
+[1
+]
+[3
+]
+[5
+]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### mapfile (delimeter): -d delim
+# Note: Bash-4.4+
+type mapfile >/dev/null 2>&1 || exit 0
+printf '%s:' {1..5..2} | {
+  mapfile -d : arr
+  echo "n=${#arr[@]}"
+  printf '[%s]\n' "${arr[@]}"
+}
+## STDOUT:
+n=3
+[1:]
+[3:]
+[5:]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### mapfile (delimiter): -d '' (null-separated)
+# Note: Bash-4.4+
+type mapfile >/dev/null 2>&1 || exit 0
+printf '%s\0' {1..5..2} | {
+  mapfile -d '' arr
+  echo "n=${#arr[@]}"
+  printf '[%s]\n' "${arr[@]}"
+}
+## STDOUT:
+n=3
+[1]
+[3]
+[5]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### mapfile (truncate delim): -t
+type mapfile >/dev/null 2>&1 || exit 0
+printf '%s\n' {1..5..2} | {
+  mapfile -t arr
+  echo "n=${#arr[@]}"
+  printf '[%s]\n' "${arr[@]}"
+}
+## STDOUT:
+n=3
+[1]
+[3]
+[5]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### mapfile (store position): -O start
+type mapfile >/dev/null 2>&1 || exit 0
+printf '%s\n' a{0..2} | {
+  arr=(x y z)
+  mapfile -O 2 -t arr
+  echo "n=${#arr[@]}"
+  printf '[%s]\n' "${arr[@]}"
+}
+## STDOUT:
+n=5
+[x]
+[y]
+[a0]
+[a1]
+[a2]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""
+
+#### mapfile (input range): -s start -n count
+type mapfile >/dev/null 2>&1 || exit 0
+printf '%s\n' a{0..10} | {
+  mapfile -s 5 -n 3 -t arr
+  echo "n=${#arr[@]}"
+  printf '[%s]\n' "${arr[@]}"
+}
+## STDOUT:
+n=3
+[a5]
+[a6]
+[a7]
+## END
+## N-I dash/mksh/zsh/ash stdout-json: ""

@@ -12,6 +12,7 @@ from _devbuild.gen.syntax_asdl import (
 )
 from asdl import format as fmt
 from core import alloc
+#from core import dev
 from core import error
 #from core import main_loop
 from core import meta
@@ -29,16 +30,20 @@ from osh import split
 # Evaluators
 # This causes errors in oil_lang/{objects,regex_translate}, builtin_pure, etc.
 # builtin_pure.Command maybe shouldn't be hard-coded?
-#from osh import cmd_exec
+#from osh import cmd_eval
 from osh import sh_expr_eval
 from osh import word_eval
-
-_ = log
 
 from typing import List, Dict, Tuple, Optional, cast, TYPE_CHECKING
 if TYPE_CHECKING:
   from osh.cmd_parse import CommandParser
   from pgen2.grammar import Grammar
+
+
+if mylib.PYTHON:
+  unused1 = log
+  #unused2 = cmd_eval  # lint ignore
+  #unused3 = dev
 
 
 # TEMP: Copied from core/main_loop.py
@@ -208,7 +213,7 @@ def main(argv):
   errfmt = ui.ErrorFormatter(arena)
 
   splitter = split.SplitContext(mem)
-  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, errfmt)
+  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, parse_ctx, errfmt)
   word_ev = word_eval.NormalWordEvaluator(mem, exec_opts, splitter, errfmt)
 
   arith_ev.word_ev = word_ev

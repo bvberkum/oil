@@ -30,6 +30,7 @@ print re.sub(
 _git-changelog-body() {
   local prev_branch=$1
   local cur_branch=$2
+  shift 2
 
   # - a trick for HTML escaping (avoid XSS): surround %s with unlikely bytes,
   #   \x00 and \x01.  Then pipe Python to escape.
@@ -49,6 +50,7 @@ _git-changelog-body() {
     --reverse \
     --pretty="format:$format" \
     --date=short \
+    "$@" \
   | escape-segments
 }
 
@@ -339,6 +341,11 @@ git-changelog-0.8.pre2() {
     > _release/VERSION/changelog.html
 }
 
+git-changelog-0.8.pre3() {
+  _git-changelog origin/release/0.8.pre2 release/0.8.pre3 \
+    > _release/VERSION/changelog.html
+}
+
 
 # For announcement.html
 html-redirect() {
@@ -533,12 +540,17 @@ announcement-0.8.pre1() {
 }
 
 announcement-0.8.pre2() {
-  write-no-announcement
+  html-redirect '/blog/2020/03/release-metrics.html' > $SITE_DEPLOY_DIR/release/0.8.pre2/announcement.html
+}
+
+announcement-0.8.pre3() {
+  html-redirect '/blog/2020/03/release-0.8.pre3.html' > $SITE_DEPLOY_DIR/release/0.8.pre3/announcement.html
 }
 
 blog-redirect() {
   html-redirect 'making-plans.html' > $SITE_DEPLOY_DIR/blog/2020/01/11.html
 }
 
-
-"$@"
+if test $(basename $0) = 'release-version.sh'; then
+  "$@"
+fi

@@ -353,6 +353,21 @@ divzero() {
   _error-case 'set -e; (( a = 1 % 0 ));'
 }
 
+unsafe_arith_eval() {
+  shopt -s unsafe_arith_eval
+
+  local e1='1+'
+  local e2='e1 + 5'
+  echo $(( e2 ))
+}
+
+unset_expr() {
+  shopt -s unsafe_arith_eval
+
+  _error-case 'unset -v 1[1]'
+  _error-case 'unset -v 1+2'
+}
+
 # Only dash flags this as an error.
 string_to_int_arith() {
   local x='ZZZ'
@@ -702,6 +717,7 @@ all() {
     nounset_arith divzero \
     array_arith undef_arith undef_arith2 \
     undef_assoc_array \
+    unsafe_arith_eval unset_expr \
     string_to_int_arith string_to_hex string_to_octal \
     string_to_intbase string_to_int_bool string_as_array \
     array_assign_1 array_assign_2 readonly_assign \

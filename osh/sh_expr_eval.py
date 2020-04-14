@@ -13,26 +13,27 @@ from _devbuild.gen.id_kind_asdl import Id
 from _devbuild.gen.runtime_asdl import (
     scope_e, scope_t,
     quote_e, quote_t,
-    lvalue, lvalue_t, 
+    lvalue, lvalue_e, lvalue_t, lvalue__Named, lvalue__Indexed, lvalue__Keyed,
     value, value_e, value_t, value__Str, value__Int, value__MaybeStrArray,
     value__AssocArray, value__Obj,
 )
 from _devbuild.gen.syntax_asdl import (
-    arith_expr_e, arith_expr_t, arith_expr__VarRef, arith_expr__ArithWord,
+    arith_expr_e, arith_expr_t,
     arith_expr__Unary, arith_expr__Binary, arith_expr__UnaryAssign,
     arith_expr__BinaryAssign, arith_expr__TernaryOp,
     bool_expr_e, bool_expr_t, bool_expr__WordTest, bool_expr__LogicalNot,
     bool_expr__LogicalAnd, bool_expr__LogicalOr, bool_expr__Unary,
     bool_expr__Binary,
+    compound_word, Token,
     sh_lhs_expr_e, sh_lhs_expr_t, sh_lhs_expr__Name, sh_lhs_expr__IndexedName,
-    word_t,
+    source, word_t,
 )
 from _devbuild.gen.types_asdl import bool_arg_type_e
 from asdl import runtime
 from core import error
 from core import state
 from core import ui
-from core.util import e_die, log
+from core.util import e_die, e_strict, log
 from frontend import location
 from frontend import consts
 from frontend import match
@@ -48,92 +49,25 @@ if TYPE_CHECKING:
   from core.ui import ErrorFormatter
   from core import optview
   from core.state import Mem
+  from frontend.parse_lib import ParseContext
   from osh import word_eval
 
 _ = log
 
 
-def _StringToInteger(s, span_id=runtime.NO_SPID):
-  # type: (str, int) -> int
-  """Use bash-like rules to coerce a string to an integer.
-
-  Runtime parsing enables silly stuff like $(( $(echo 1)$(echo 2) + 1 )) => 13
-
-  0xAB -- hex constant
-  042  -- octal constant
-  42   -- decimal constant
-  64#z -- arbitary base constant
-
-  bare word: variable
-  quoted word: string (not done?)
-  """
-  if s.startswith('0x'):
-    try:
-      integer = int(s, 16)
-    except ValueError:
-      e_die('Invalid hex constant %r', s, span_id=span_id)
-    return integer
-
-  if s.startswith('0'):
-    try:
-      integer = int(s, 8)
-    except ValueError:
-      e_die('Invalid octal constant %r', s, span_id=span_id)
-    return integer
-
-  if '#' in s:
-    parts = s.split('#', 1)  # mycpp rewrite: can't use dynamic unpacking of List
-    b = parts[0]
-    digits = parts[1]
-    try:
-      base = int(b)
-    except ValueError:
-      e_die('Invalid base for numeric constant %r',  b, span_id=span_id)
-
-    integer = 0
-    n = 1
-    for ch in digits:
-      if 'a' <= ch and ch <= 'z':
-        digit = ord(ch) - ord('a') + 10
-      elif 'A' <= ch and ch <= 'Z':
-        digit = ord(ch) - ord('A') + 36
-      elif ch == '@':  # horrible syntax
-        digit = 62
-      elif ch == '_':
-        digit = 63
-      elif ch.isdigit():
-        digit = int(ch)
-      else:
-        e_die('Invalid digits for numeric constant %r', digits, span_id=span_id)
-
-      if digit >= base:
-        e_die('Digits %r out of range for base %d', digits, base, span_id=span_id)
-
-      integer += digit * n
-      n *= base
-    return integer
-
-  # Normal base 10 integer
-  try:
-    integer = int(s)
-  except ValueError:
-    e_die("Invalid integer constant %r", s, span_id=span_id)
-  return integer
-
-
 #
-# Common logic for Arith and Command/Word variants of the same expression
+# Arith and Command/Word variants of assignment
 #
-# Calls EvalLhs()
-#   a[$key]=$val             # osh/cmd_exec.py:814  (command_e.ShAssignment)
-# Calls _EvalLhsArith()
+# Calls EvalShellLhs()
+#   a[$key]=$val             # osh/cmd_eval.py:814  (command_e.ShAssignment)
+# Calls EvalArithLhs()
 #   (( a[key] = val ))       # osh/sh_expr_eval.py:326 (_EvalLhsArith)
 #
-# Calls EvalLhsAndLookup():
-#   a[$key]+=$val            # osh/cmd_exec.py:795     (assign_op_e.PlusEqual)
+# Calls OldValue()
+#   a[$key]+=$val            # osh/cmd_eval.py:795     (assign_op_e.PlusEqual)
 #   (( a[key] += val ))      # osh/sh_expr_eval.py:308 (_EvalLhsAndLookupArith)
 #
-# Uses Python's [] operator
+# RHS Indexing
 #   val=${a[$key]}           # osh/word_eval.py:639 (bracket_op_e.ArrayIndex)
 #   (( val = a[key] ))       # osh/sh_expr_eval.py:509 (Id.Arith_LBracket)
 #
@@ -149,177 +83,94 @@ def _LookupVar(name, mem, exec_opts):
   return val
 
 
-def EvalLhs(node, arith_ev, mem, spid, lookup_mode):
-  # type: (sh_lhs_expr_t, ArithEvaluator, Mem, int, scope_t) -> lvalue_t
-  """Evaluate a shell "place" expression.
-
-  Used for a=b and a[x]=b
+def OldValue(lval, mem, exec_opts):
+  # type: (lvalue_t, Mem, optview.Exec) -> value_t
   """
-  assert isinstance(node, sh_lhs_expr_t), node
+  Used by s+='x' and (( i += 1 ))
 
-  UP_node = node
-  lval = None  # type: lvalue_t
-  with tagswitch(node) as case:
-    if case(sh_lhs_expr_e.Name):  # a=x
-      node = cast(sh_lhs_expr__Name, UP_node)
+  TODO: We need a stricter and less ambiguous version for Oil.
 
-      # Note: C++ constructor doesn't take spids directly.  Should we add that?
-      lval1 = lvalue.Named(node.name)
-      lval1.spids.append(spid)
-      lval = lval1
+  Problem:
 
-    elif case(sh_lhs_expr_e.IndexedName):  # a[1+2]=x
-      node = cast(sh_lhs_expr__IndexedName, UP_node)
+  - why does lvalue have Indexed and Keyed, while sh_lhs_expr only has
+    IndexedName?
+    - should I have lvalue.Named and lvalue.Indexed only?
+    - and Indexed uses the index_t type?
+      - well that might be Str or Int
+  """
+  assert isinstance(lval, lvalue_t), lval
 
-      if mem.IsAssocArray(node.name, lookup_mode):
-        key = arith_ev.EvalWordToString(node.index)
-        # copy left-mode spid
-        lval2 = lvalue.Keyed(node.name, key)
-        lval2.spids.append(node.spids[0])
-        lval = lval2
-      else:
-        index = arith_ev.EvalToInt(node.index)
-        # copy left-mode spid
-        lval3 = lvalue.Indexed(node.name, index)
-        lval3.spids.append(node.spids[0])
-        lval = lval3
-
+  # TODO: refactor lvalue_t to make this simpler
+  UP_lval = lval
+  with tagswitch(lval) as case:
+    if case(lvalue_e.Named):  # (( i++ ))
+      lval = cast(lvalue__Named, UP_lval)
+      var_name = lval.name
+    elif case(lvalue_e.Indexed):  # (( a[i]++ ))
+      lval = cast(lvalue__Indexed, UP_lval)
+      var_name = lval.name
+    elif case(lvalue_e.Keyed):  # (( A['K']++ )) ?  I think this works
+      lval = cast(lvalue__Keyed, UP_lval)
+      var_name = lval.name
     else:
-      raise AssertionError(node.tag_())
+      raise AssertionError()
 
-  return lval
+  val = _LookupVar(var_name, mem, exec_opts)
 
+  UP_val = val
+  with tagswitch(lval) as case:
+    if case(lvalue_e.Named):
+      return val
 
-def _EvalLhsArith(node, mem, arith_ev):
-  # type: (sh_lhs_expr_t, Mem, ArithEvaluator) -> lvalue_t
-  """Evaluate an arithmetic "place" expression.
-  
-  Very similar to EvalLhs above, called in osh/cmd_exec.py.
-  """
-  assert isinstance(node, sh_lhs_expr_t), node
+    elif case(lvalue_e.Indexed):
+      lval = cast(lvalue__Indexed, UP_lval)
 
-  UP_node = node
-  with tagswitch(node) as case:
-    if case(sh_lhs_expr_e.Name):  # (( i = 42 ))
-      node = cast(sh_lhs_expr__Name, UP_node)
-
-      lval = lvalue.Named(node.name)  # type: lvalue_t
-      # TODO: location info.  Use the = token?
-      #lval.spids.append(spid)
-
-    elif case(sh_lhs_expr_e.IndexedName):  # (( a[42] = 42 ))
-      node = cast(sh_lhs_expr__IndexedName, UP_node)
-
-      # The index of MaybeStrArray needs to be coerced to int, but not the
-      # index of an AssocArray.
-      if mem.IsAssocArray(node.name, scope_e.Dynamic):
-        key = arith_ev.EvalWordToString(node.index)
-        lval = lvalue.Keyed(node.name, key)
-      else:
-        index = arith_ev.EvalToInt(node.index)
-        lval = lvalue.Indexed(node.name, index)
-        # TODO: location info.  Use the = token?
-        #lval.spids.append(node.spids[0])
-
-    else:
-      raise AssertionError(node.tag_())
-
-  return lval
-
-
-def EvalLhsAndLookup(node, arith_ev, mem, exec_opts,
-                     lookup_mode=scope_e.Dynamic):
-  # type: (sh_lhs_expr_t, ArithEvaluator, Mem, optview.Exec, scope_t) -> Tuple[value_t, lvalue_t]
-  """Evaluate the operand for i++, a[0]++, i+=2, a[0]+=2 as an R-value.
-
-  Also used by the Executor for s+='x' and a[42]+='x'.
-
-  Args:
-    node: syntax_asdl.sh_lhs_expr
-
-  Returns:
-    value_t, lvalue_t
-  """
-  #log('sh_lhs_expr NODE %s', node)
-
-  assert isinstance(node, sh_lhs_expr_t), node
-
-  UP_node = node
-  with tagswitch(node) as case:
-    if case(sh_lhs_expr_e.Name):  # a = b
-      node = cast(sh_lhs_expr__Name, UP_node)
-      # Problem: It can't be an array?
-      # a=(1 2)
-      # (( a++ ))
-      lval = lvalue.Named(node.name)  # type: lvalue_t
-      val = _LookupVar(node.name, mem, exec_opts)
-
-    elif case(sh_lhs_expr_e.IndexedName):  # a[1] = b
-      node = cast(sh_lhs_expr__IndexedName, UP_node)
-      # See tdop.IsIndexable for valid values:
-      # - VarRef (not Name): a[1]
-      # - FuncCall: f(x), 1
-      # - Binary LBracket: f[1][1] -- no semantics for this?
-
-      val = mem.GetVar(node.name)
-
-      UP_val = val
+      array_val = None  # type: value__MaybeStrArray
       with tagswitch(val) as case2:
-        if case2(value_e.Str):
-          e_die("Can't assign to characters of string %r", node.name)
-
-        elif case2(value_e.Undef):
-          # compatible behavior: Treat it like an array.
-          # TODO: Does this code ever get triggered?  It seems like the error is
-          # caught earlier.
-
-          index = arith_ev.EvalToInt(node.index)
-          lval = lvalue.Indexed(node.name, index)
-          if exec_opts.nounset():
-            e_die("Undefined variable can't be indexed")
-          else:
-            val = value.Str('')
-
+        if case2(value_e.Undef):
+          array_val = value.MaybeStrArray([])
         elif case2(value_e.MaybeStrArray):
           array_val = cast(value__MaybeStrArray, UP_val)
-
-          #log('ARRAY %s -> %s, index %d', node.name, array, index)
-          index = arith_ev.EvalToInt(node.index)
-          lval = lvalue.Indexed(node.name, index)
-          # NOTE: Similar logic in RHS Arith_LBracket
-          try:
-            s = array_val.strs[index]
-          except IndexError:
-            s = None
-
-          if s is None:
-            val = value.Str('')  # NOTE: Other logic is value.Undef()?  0?
-          else:
-            assert isinstance(s, str), s
-            val = value.Str(s)
-
-        elif case2(value_e.AssocArray):  # declare -A a; a['x']+=1
-          assoc_val = cast(value__AssocArray, UP_val)
-
-          key = arith_ev.EvalWordToString(node.index)
-          lval = lvalue.Keyed(node.name, key)
-
-          s = assoc_val.d.get(key)
-          if s is None:
-            val = value.Str('')
-          else:
-            val = value.Str(s)
-
         else:
-          raise AssertionError(val.tag_())
+          e_die("Can't use [] on value of type %s", ui.ValType(val))
+
+      try:
+        s = array_val.strs[lval.index]
+      except IndexError:
+        s = None
+
+      if s is None:
+        val = value.Str('')  # NOTE: Other logic is value.Undef()?  0?
+      else:
+        assert isinstance(s, str), s
+        val = value.Str(s)
+
+    elif case(lvalue_e.Keyed):
+      lval = cast(lvalue__Keyed, UP_lval)
+
+      assoc_val = None  # type: value__AssocArray
+      with tagswitch(val) as case2:
+        if case2(value_e.Undef):
+          # This never happens, because undef[x]+= is assumed to
+          raise AssertionError()
+        elif case2(value_e.AssocArray):
+          assoc_val = cast(value__AssocArray, UP_val)
+        else:
+          e_die("Can't use [] on value of type %s", ui.ValType(val))
+
+      s = assoc_val.d.get(lval.key)
+      if s is None:
+        val = value.Str('')
+      else:
+        val = value.Str(s)
 
     else:
-      raise AssertionError(node.tag_())
+      raise AssertionError()
 
-  return val, lval
+  return val
 
 
-class _ExprEvaluator(object):
+class ArithEvaluator(object):
   """Shared between arith and bool evaluators.
 
   They both:
@@ -328,24 +179,109 @@ class _ExprEvaluator(object):
   2. Look up variables and evaluate words.
   """
 
-  def __init__(self, mem, exec_opts, errfmt):
-    # type: (Mem, optview.Exec, ErrorFormatter) -> None
+  def __init__(self, mem, exec_opts, parse_ctx, errfmt):
+    # type: (Mem, optview.Exec, Optional[ParseContext], ErrorFormatter) -> None
     self.word_ev = None  # type: word_eval.StringWordEvaluator
     self.mem = mem
     self.exec_opts = exec_opts
+    self.parse_ctx = parse_ctx
     self.errfmt = errfmt
 
   def CheckCircularDeps(self):
     # type: () -> None
     assert self.word_ev is not None
 
+  def _StringToInteger(self, s, span_id=runtime.NO_SPID):
+    # type: (str, int) -> int
+    """Use bash-like rules to coerce a string to an integer.
 
-class ArithEvaluator(_ExprEvaluator):
+    Runtime parsing enables silly stuff like $(( $(echo 1)$(echo 2) + 1 )) => 13
 
-  def __init__(self, mem, exec_opts, errfmt):
-    # type: (Mem, optview.Exec, ErrorFormatter) -> None
-    """Redundant constructor for mycpp."""
-    _ExprEvaluator.__init__(self, mem, exec_opts, errfmt)
+    0xAB -- hex constant
+    042  -- octal constant
+    42   -- decimal constant
+    64#z -- arbitary base constant
+
+    bare word: variable
+    quoted word: string (not done?)
+    """
+    if s.startswith('0x'):
+      try:
+        integer = int(s, 16)
+      except ValueError:
+        e_strict('Invalid hex constant %r', s, span_id=span_id)
+      return integer
+
+    if s.startswith('0'):
+      try:
+        integer = int(s, 8)
+      except ValueError:
+        e_strict('Invalid octal constant %r', s, span_id=span_id)
+      return integer
+
+    if '#' in s:
+      parts = s.split('#', 1)  # mycpp rewrite: can't use dynamic unpacking of List
+      b = parts[0]
+      digits = parts[1]
+      try:
+        base = int(b)
+      except ValueError:
+        e_strict('Invalid base for numeric constant %r',  b, span_id=span_id)
+
+      integer = 0
+      n = 1
+      for ch in digits:
+        if 'a' <= ch and ch <= 'z':
+          digit = ord(ch) - ord('a') + 10
+        elif 'A' <= ch and ch <= 'Z':
+          digit = ord(ch) - ord('A') + 36
+        elif ch == '@':  # horrible syntax
+          digit = 62
+        elif ch == '_':
+          digit = 63
+        elif ch.isdigit():
+          digit = int(ch)
+        else:
+          e_strict('Invalid digits for numeric constant %r', digits, span_id=span_id)
+
+        if digit >= base:
+          e_strict('Digits %r out of range for base %d', digits, base, span_id=span_id)
+
+        integer += digit * n
+        n *= base
+      return integer
+
+    try:
+      # Normal base 10 integer.  This includes negative numbers like '-42'.
+      integer = int(s)
+    except ValueError:
+      # doesn't look like an integer
+
+      # note: 'test' and '[' never evaluate recursively
+      if self.exec_opts.eval_unsafe_arith() and self.parse_ctx:
+        # Special case so we don't get EOF error
+        if len(s.strip()) == 0:
+          return 0
+
+        # For compatibility: Try to parse it as an expression and evaluate it.
+
+        arena = self.parse_ctx.arena
+
+        a_parser = self.parse_ctx.MakeArithParser(s)
+        arena.PushSource(source.Variable(span_id))
+        try:
+          node2 = a_parser.Parse()  # may raise error.Parse
+        except error.Parse as e:
+          ui.PrettyPrintError(e, arena)
+          e_die('Parse error in recursive arithmetic', span_id=e.span_id)
+        finally:
+          arena.PopSource()
+
+        integer = self.EvalToInt(node2)
+      else:
+        e_strict("Invalid integer constant %r", s, span_id=span_id)
+
+    return integer
 
   def _ValToIntOrError(self, val, span_id=runtime.NO_SPID):
     # type: (value_t, int) -> int
@@ -355,7 +291,7 @@ class ArithEvaluator(_ExprEvaluator):
         if case(value_e.Undef):  # 'nounset' already handled before got here
           # Happens upon a[undefined]=42, which unfortunately turns into a[0]=42.
           #log('blame_word %s   arena %s', blame_word, self.arena)
-          e_die('Undefined value in arithmetic context', span_id=span_id)
+          e_strict('Undefined value in arithmetic context', span_id=span_id)
 
         elif case(value_e.Int):
           val = cast(value__Int, UP_val)
@@ -363,7 +299,7 @@ class ArithEvaluator(_ExprEvaluator):
 
         elif case(value_e.Str):
           val = cast(value__Str, UP_val)
-          return _StringToInteger(val.s, span_id=span_id)  # calls e_die
+          return self._StringToInteger(val.s, span_id=span_id)  # calls e_strict
 
         elif case(value_e.Obj):
           # Note: this handles var x = 42; echo $(( x > 2 )).
@@ -373,37 +309,31 @@ class ArithEvaluator(_ExprEvaluator):
               return val.obj
           raise AssertionError()  # not in C++
 
-    except error.FatalRuntime as e:
+    except error.Strict as e:
       if self.exec_opts.strict_arith():
         raise
       else:
-        span_id = word_.SpanIdFromError(e)
-        self.errfmt.PrettyPrintError(e, prefix='warning: ')
         return 0
 
-    # Arrays and associative arrays always fail -- not controlled by strict_arith.
+    # Arrays and associative arrays always fail -- not controlled by
+    # strict_arith.
     # In bash, (( a )) is like (( a[0] )), but I don't want that.
     # And returning '0' gives different results.
     e_die("Expected a value convertible to integer, got %s",
           ui.ValType(val), span_id=span_id)
 
   def _EvalLhsAndLookupArith(self, node):
-    # type: (sh_lhs_expr_t) -> Tuple[int, lvalue_t]
-    """
-    Args:
-      node: sh_lhs_expr
+    # type: (arith_expr_t) -> Tuple[int, lvalue_t]
+    """ For x = y  and   x += y  and  ++x """
 
-    Returns:
-      (Python object, lvalue_t)
-    """
-    val, lval = EvalLhsAndLookup(node, self, self.mem, self.exec_opts)
+    lval = self.EvalArithLhs(node, runtime.NO_SPID)
+    val = OldValue(lval, self.mem, self.exec_opts)
 
-    if val.tag_() == value_e.MaybeStrArray:
-      e_die("Can't use assignment like ++ or += on arrays")
+    # This error message could be better, but we already have one
+    #if val.tag_() == value_e.MaybeStrArray:
+    #  e_die("Can't use assignment like ++ or += on arrays")
 
-    # TODO: attribute a span ID here.  There are a few cases, like UnaryAssign
-    # and BinaryAssign.
-    span_id = word_.SpanForLhsExpr(node)
+    span_id = location.SpanForArithExpr(node)
     i = self._ValToIntOrError(val, span_id=span_id)
     return i, lval
 
@@ -447,13 +377,12 @@ class ArithEvaluator(_ExprEvaluator):
     UP_node = node
     with tagswitch(node) as case:
       if case(arith_expr_e.VarRef):  # $(( x ))  (can be array)
-        node = cast(arith_expr__VarRef, UP_node)
-        tok = node.token
+        tok = cast(Token, UP_node)
         return _LookupVar(tok.val, self.mem, self.exec_opts)
 
-      elif case(arith_expr_e.ArithWord):  # $(( $x )) $(( ${x}${y} )), etc.
-        node = cast(arith_expr__ArithWord, UP_node)
-        return self.word_ev.EvalWordToString(node.w)
+      elif case(arith_expr_e.Word):  # $(( $x )) $(( ${x}${y} )), etc.
+        w = cast(compound_word, UP_node)
+        return self.word_ev.EvalWordToString(w)
 
       elif case(arith_expr_e.UnaryAssign):  # a++
         node = cast(arith_expr__UnaryAssign, UP_node)
@@ -489,10 +418,11 @@ class ArithEvaluator(_ExprEvaluator):
         op_id = node.op_id
 
         if op_id == Id.Arith_Equal:
-          lval = _EvalLhsArith(node.left, self.mem, self)
-          # Disallowing (( a = myarray ))
-          # It has to be an integer
+          # Don't really need a span ID here, because tdop.CheckLhsExpr should
+          # have done all the validation.
+          lval = self.EvalArithLhs(node.left, runtime.NO_SPID)
           rhs_int = self.EvalToInt(node.right)
+
           self._Store(lval, rhs_int)
           return value.Int(rhs_int)
 
@@ -608,8 +538,9 @@ class ArithEvaluator(_ExprEvaluator):
           return val
 
         if op_id == Id.Arith_Comma:
-          self.Eval(node.left)  # throw away result
-          return self.Eval(node.right)
+          self.EvalToInt(node.left)  # throw away result
+          ret = self.EvalToInt(node.right)
+          return value.Int(ret)
 
         # Rest are integers
         lhs = self.EvalToInt(node.left)
@@ -708,20 +639,119 @@ class ArithEvaluator(_ExprEvaluator):
     a[$x] a["$x"] a["x"] a['x']
     """
     UP_node = node
-    if node.tag_() == arith_expr_e.ArithWord:  # $(( $x )) $(( ${x}${y} )), etc.
-      node = cast(arith_expr__ArithWord, UP_node)
-      val = self.word_ev.EvalWordToString(node.w)
+    if node.tag_() == arith_expr_e.Word:  # $(( $x )) $(( ${x}${y} )), etc.
+      w = cast(compound_word, UP_node)
+      val = self.word_ev.EvalWordToString(w)
       return val.s
     else:
       # TODO: location info for orginal
       e_die("Associative array keys must be strings: $x 'x' \"$x\" etc.")
 
+  def EvalShellLhs(self, node, spid, lookup_mode):
+    # type: (sh_lhs_expr_t, int, scope_t) -> lvalue_t
+    """Evaluate a shell LHS expression, i.e. place expression.
 
-class BoolEvaluator(_ExprEvaluator):
+    For  a=b  and  a[x]=b  etc.
+    """
+    assert isinstance(node, sh_lhs_expr_t), node
 
-  def __init__(self, mem, exec_opts, errfmt):
-    # type: (Mem, optview.Exec, ErrorFormatter) -> None
-    _ExprEvaluator.__init__(self, mem, exec_opts, errfmt)
+    UP_node = node
+    lval = None  # type: lvalue_t
+    with tagswitch(node) as case:
+      if case(sh_lhs_expr_e.Name):  # a=x
+        node = cast(sh_lhs_expr__Name, UP_node)
+
+        # Note: C++ constructor doesn't take spids directly.  Should we add that?
+        lval1 = lvalue.Named(node.name)
+        lval1.spids.append(spid)
+        lval = lval1
+
+      elif case(sh_lhs_expr_e.IndexedName):  # a[1+2]=x
+        node = cast(sh_lhs_expr__IndexedName, UP_node)
+
+        if self.mem.IsAssocArray(node.name, lookup_mode):
+          key = self.EvalWordToString(node.index)
+          lval2 = lvalue.Keyed(node.name, key)
+          lval2.spids.append(node.spids[0])
+          lval = lval2
+        else:
+          index = self.EvalToInt(node.index)
+          lval3 = lvalue.Indexed(node.name, index)
+          lval3.spids.append(node.spids[0])
+          lval = lval3
+
+      else:
+        raise AssertionError(node.tag_())
+
+    return lval
+
+  def _VarRefOrWord(self, anode):
+    # type: (arith_expr_t) -> Tuple[Optional[str], int]
+    """
+    Returns (var_name, span_id) if the arith node can be interpreted that way
+    """
+    UP_anode = anode
+    with tagswitch(anode) as case:
+      if case(arith_expr_e.VarRef):
+        tok = cast(Token, UP_anode)
+        return (tok.val, tok.span_id)
+
+      elif case(arith_expr_e.Word):
+        w = cast(compound_word, UP_anode)
+        var_name = self.EvalWordToString(w)
+        span_id = word_.LeftMostSpanForWord(w)
+        return (var_name, span_id)
+
+    no_str = None  # type: str
+    return (no_str, runtime.NO_SPID)
+
+  def EvalArithLhs(self, anode, span_id):
+    # type: (arith_expr_t, int) -> lvalue_t
+    """
+    For (( a[x] = 1 )) etc.
+    """
+    UP_anode = anode
+    if anode.tag_() == arith_expr_e.Binary:
+      anode = cast(arith_expr__Binary, UP_anode)
+      if anode.op_id == Id.Arith_LBracket:
+        var_name, span_id = self._VarRefOrWord(anode.left)
+        if var_name is not None:
+          if self.mem.IsAssocArray(var_name, scope_e.Dynamic):
+            key = self.EvalWordToString(anode.right)
+            lval2 = lvalue.Keyed(var_name, key)
+            lval2.spids.append(span_id)
+            lval = lval2  # type: lvalue_t
+            return lval
+          else:
+            index = self.EvalToInt(anode.right)
+            lval3 = lvalue.Indexed(var_name, index)
+            lval3.spids.append(span_id)
+            lval = lval3
+            return lval
+
+    var_name, span_id = self._VarRefOrWord(anode)
+    if var_name is not None:
+      lval1 = lvalue.Named(var_name)
+      lval1.spids.append(span_id)
+      lval = lval1
+      return lval
+
+    # e.g. unset 'x-y'.  status 2 for runtime parse error
+    e_die('Invalid place to modify', span_id=span_id, status=2)
+
+
+class BoolEvaluator(ArithEvaluator):
+  """
+  This is also an ArithEvaluator because it has to understand
+
+  [[ x -eq 3 ]]
+
+  where x='1+2'
+  """
+
+  def __init__(self, mem, exec_opts, parse_ctx, errfmt):
+    # type: (Mem, optview.Exec, ParseContext, ErrorFormatter) -> None
+    ArithEvaluator.__init__(self, mem, exec_opts, parse_ctx, errfmt)
     self.always_strict = False
 
   def Init_AlwaysStrict(self):
@@ -738,12 +768,11 @@ class BoolEvaluator(_ExprEvaluator):
       span_id = runtime.NO_SPID
 
     try:
-      i = _StringToInteger(s, span_id=span_id)
-    except error.FatalRuntime as e:
+      i = self._StringToInteger(s, span_id=span_id)
+    except error.Strict as e:
       if self.always_strict or self.exec_opts.strict_arith():
         raise
       else:
-        self.errfmt.PrettyPrintError(e, prefix='warning: ')
         i = 0
     return i
 
@@ -757,7 +786,7 @@ class BoolEvaluator(_ExprEvaluator):
     """For ~= to set the BASH_REMATCH array."""
     state.SetGlobalArray(self.mem, 'BASH_REMATCH', matches)
 
-  def Eval(self, node):
+  def EvalB(self, node):
     # type: (bool_expr_t) -> bool
 
     UP_node = node
@@ -769,23 +798,23 @@ class BoolEvaluator(_ExprEvaluator):
 
       elif case(bool_expr_e.LogicalNot):
         node = cast(bool_expr__LogicalNot, UP_node)
-        b = self.Eval(node.child)
+        b = self.EvalB(node.child)
         return not b
 
       elif case(bool_expr_e.LogicalAnd):
         node = cast(bool_expr__LogicalAnd, UP_node)
         # Short-circuit evaluation
-        if self.Eval(node.left):
-          return self.Eval(node.right)
+        if self.EvalB(node.left):
+          return self.EvalB(node.right)
         else:
           return False
 
       elif case(bool_expr_e.LogicalOr):
         node = cast(bool_expr__LogicalOr, UP_node)
-        if self.Eval(node.left):
+        if self.EvalB(node.left):
           return True
         else:
-          return self.Eval(node.right)
+          return self.EvalB(node.right)
 
       elif case(bool_expr_e.Unary):
         node = cast(bool_expr__Unary, UP_node)

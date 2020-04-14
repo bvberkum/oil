@@ -39,6 +39,7 @@ pyann-patched() {
 # Oil to pass under --strict someday.
 typed-demo-asdl() {
   asdl/run.sh gen-typed-demo-asdl
+
   typecheck --strict \
     _devbuild/gen/typed_demo_asdl.py asdl/typed_demo.py
 

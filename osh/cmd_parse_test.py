@@ -184,7 +184,7 @@ class OldStaticParsing(object):
 def assertHereDocToken(test, expected_token_val, node):
   """A sanity check for some ad hoc tests."""
   test.assertEqual(1, len(node.redirects))
-  h = node.redirects[0]
+  h = node.redirects[0].arg
   test.assertEqual(expected_token_val, h.stdin_parts[0].val)
 
 
@@ -200,7 +200,7 @@ $v
 EOF
 """)
     self.assertEqual(1, len(node.redirects))
-    h = node.redirects[0]
+    h = node.redirects[0].arg
     # 4 literal parts: VarSub, newline, right ", "two\n"
     self.assertEqual(4, len(h.stdin_parts))
 
@@ -213,7 +213,7 @@ $v
 EOF
 """)
     self.assertEqual(1, len(node.redirects))
-    h = node.redirects[0]
+    h = node.redirects[0].arg
     self.assertEqual(2, len(h.stdin_parts))  # 2 literal parts
 
     node = assert_ParseCommandLine(self, """\
@@ -222,7 +222,7 @@ single-quoted: $var
 EOF
 """)
     self.assertEqual(1, len(node.redirects))
-    h = node.redirects[0]
+    h = node.redirects[0].arg
     self.assertEqual(1, len(h.stdin_parts))  # 1 line, one literal part
 
     # \ escape
@@ -232,7 +232,7 @@ single-quoted: $var
 EOF
 """)
     self.assertEqual(1, len(node.redirects))
-    h = node.redirects[0]
+    h = node.redirects[0].arg
     self.assertEqual(1, len(h.stdin_parts))  # 1 line, one literal part
 
   def testLeadingTabs(self):
@@ -825,7 +825,7 @@ class NestedParensTest(unittest.TestCase):
     node = assert_ParseCommandList(self,
         '(echo $((1+2)))')
     self.assertEqual(command_e.Subshell, node.tag)
-    self.assertEqual(command_e.CommandList, node.command_list.tag)
+    self.assertEqual(command_e.Simple, node.child.tag)
 
   def testArithGroupingWithin(self):
     # Within com sub
@@ -838,7 +838,7 @@ class NestedParensTest(unittest.TestCase):
     node = assert_ParseCommandList(self,
         '(echo $((1*(2+3))) )')
     self.assertEqual(command_e.Subshell, node.tag)
-    self.assertEqual(command_e.CommandList, node.command_list.tag)
+    self.assertEqual(command_e.Simple, node.child.tag)
 
   def testLhsArithGroupingWithin(self):
     # Within Arith sub
@@ -859,7 +859,7 @@ class NestedParensTest(unittest.TestCase):
     node = assert_ParseCommandList(self,
         '(fun() { echo hi; }; fun)')
     self.assertEqual(command_e.Subshell, node.tag)
-    self.assertEqual(command_e.CommandList, node.command_list.tag)
+    self.assertEqual(command_e.CommandList, node.child.tag)
 
   def testArrayLiteralWithin(self):
     node = assert_ParseCommandList(self,
@@ -870,7 +870,7 @@ class NestedParensTest(unittest.TestCase):
     node = assert_ParseCommandList(self,
         '(array=(a b c))')
     self.assertEqual(command_e.Subshell, node.tag)
-    self.assertEqual(command_e.CommandList, node.command_list.tag)
+    self.assertEqual(command_e.ShAssignment, node.child.tag)
 
   def testSubshellWithinComSub(self):
     node = assert_ParseCommandList(self,

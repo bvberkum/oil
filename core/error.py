@@ -15,6 +15,60 @@ if TYPE_CHECKING:  # avoid circular build deps
 NO_SPID = -1
 
 
+class _ControlFlow(Exception):
+  """Internal execption for control flow.
+
+  break and continue are caught by loops, return is caught by functions.
+
+  NOTE: I tried representing this in ASDL, but in Python the base class has to
+  be BaseException.  Also, 'Token' is in syntax.asdl but not runtime.asdl.
+
+  cflow =
+    -- break, continue, return, exit
+    Shell(Token keyword, int arg)
+    -- break, continue
+  | OilLoop(Token keyword)
+    -- return
+  | OilReturn(Token keyword, value val)
+  """
+
+  def __init__(self, token, arg):
+    # type: (Token, int) -> None
+    """
+    Args:
+      token: the keyword token
+    """
+    self.token = token
+    self.arg = arg
+
+  def IsReturn(self):
+    # type: () -> bool
+
+    from _devbuild.gen.id_kind_asdl import Id  # TODO: fix circular dep
+    return self.token.id == Id.ControlFlow_Return
+
+  def IsBreak(self):
+    # type: () -> bool
+
+    from _devbuild.gen.id_kind_asdl import Id  # TODO: fix circular dep
+    return self.token.id == Id.ControlFlow_Break
+
+  def IsContinue(self):
+    # type: () -> bool
+
+    from _devbuild.gen.id_kind_asdl import Id  # TODO: fix circular dep
+    return self.token.id == Id.ControlFlow_Continue
+
+  def StatusCode(self):
+    # type: () -> int
+    assert self.IsReturn()
+    return self.arg
+
+  def __repr__(self):
+    # type: () -> str
+    return '<_ControlFlow %s>' % self.token
+
+
 if mylib.PYTHON:
   class _ErrorWithLocation(Exception):
     """A parse error that can be formatted.
@@ -32,7 +86,10 @@ if mylib.PYTHON:
       self.token = kwargs.pop('token', None)  # type: Token
       self.part = kwargs.pop('part', None)  # type: word_part_t
       self.word = kwargs.pop('word', None)  # type: word_t
-      self.exit_status = kwargs.pop('status', None)  # type: int
+
+      # Runtime errors have a default status of 1.  Parse errors return 2
+      # explicitly.
+      self.exit_status = kwargs.pop('status', 1)  # type: int
       if kwargs:
         raise AssertionError('Invalid keyword args %s' % kwargs)
 
@@ -40,6 +97,10 @@ if mylib.PYTHON:
       # type: () -> bool
       return bool(self.span_id != NO_SPID or
                   self.token or self.part or self.word)
+
+    def ExitStatus(self):
+      # type: () -> int
+      return self.exit_status
 
     def __repr__(self):
       # type: () -> str
@@ -59,25 +120,17 @@ if mylib.PYTHON:
 # Need a better constructor
 if mylib.PYTHON:
   class Parse(_ErrorWithLocation):
-    """Used in the parsers.
+    """Used in the parsers."""
 
-    TODO:
-    - This could just be FatalError?
-    - You might want to catch this and add multiple locations?
-      try:
-        foo
-      except ParseError as e:
-        e.AddErrorInfo('hi', token=t)
-        raise
+  class RedirectEval(_ErrorWithLocation):
+    """Used in the CommandEvaluator.
+
+    A bad redirect causes the SimpleCommand to return with status 1.  To make it
+    fatal, use set -o errexit.
     """
 
-
-class RedirectEval(_ErrorWithLocation):
-  """Used in the Executor.
-
-  A bad redirect causes the SimpleCommand to return with status 1.  To make it
-  fatal, use set -o errexit.
-  """
+  class Runtime(_ErrorWithLocation):
+    """A non-fatal runtime error, e.g. for builtins."""
 
 
 class FatalRuntime(_ErrorWithLocation):
@@ -88,23 +141,28 @@ class FatalRuntime(_ErrorWithLocation):
   """
 
 
-class Strict(_ErrorWithLocation):
-  """
-  Whether this is fatal depends on shell options, e.g.
+class Strict(FatalRuntime):
+  """Depending on shell options, these errors may be caught and ignored.
+
+  For example, if options like these are ON:
 
     set -o strict_arith
     set -o strict_word_eval
 
-  TODO: We could do
+  then we re-raise the error so it's caught by the top level.  Otherwise
+  we catch it and return a dummy value like '' or -1 (i.e. what bash commonly
+  does.)
+
+  TODO: Have levels, like:
 
   OIL_STRICT_PRINT=2   # print warnings at level 2 and above
   OIL_STRICT_DIE=1  # abort the program at level 1 and above
   """
-  # TODO: This should have a level too?
 
 
-class ErrExit(FatalRuntime):
-  """For set -e.
+if mylib.PYTHON:
+  class ErrExit(FatalRuntime):
+    """For set -e.
 
-  Travels between WordEvaluator and Executor.
-  """
+    Travels between WordEvaluator and CommandEvaluator.
+    """

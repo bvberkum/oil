@@ -390,12 +390,12 @@ builtins() {
 }
 
 builtin-eval-source() {
-  sh-spec spec/builtin-eval-source.test.sh --no-cd-tmp --osh-failures-allowed 1 \
+  sh-spec spec/builtin-eval-source.test.sh --no-cd-tmp \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
 builtin-io() {
-  sh-spec spec/builtin-io.test.sh \
+  sh-spec spec/builtin-io.test.sh --osh-failures-allowed 8 \
     ${REF_SHELLS[@]} $ZSH $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
@@ -431,7 +431,7 @@ builtin-bracket() {
 }
 
 builtin-trap() {
-  sh-spec spec/builtin-trap.test.sh --no-cd-tmp --osh-failures-allowed 4 \
+  sh-spec spec/builtin-trap.test.sh --no-cd-tmp --osh-failures-allowed 3 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -477,7 +477,7 @@ glob() {
 }
 
 arith() {
-  sh-spec spec/arith.test.sh --osh-failures-allowed 4 \
+  sh-spec spec/arith.test.sh --osh-failures-allowed 0 \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
@@ -518,7 +518,7 @@ here-doc() {
 }
 
 redirect() {
-  sh-spec spec/redirect.test.sh --osh-failures-allowed 5 \
+  sh-spec spec/redirect.test.sh --osh-failures-allowed 1 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -528,7 +528,7 @@ posix() {
 }
 
 special-vars() {
-  sh-spec spec/special-vars.test.sh --osh-failures-allowed 4 \
+  sh-spec spec/special-vars.test.sh --osh-failures-allowed 7 \
     ${REF_SHELLS[@]} $ZSH $OSH_LIST "$@"
 }
 
@@ -587,7 +587,7 @@ var-num() {
 }
 
 var-sub-quote() {
-  sh-spec spec/var-sub-quote.test.sh --osh-failures-allowed 2 \
+  sh-spec spec/var-sub-quote.test.sh --osh-failures-allowed 4 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -602,7 +602,7 @@ sh-options() {
 }
 
 xtrace() {
-  sh-spec spec/xtrace.test.sh --osh-failures-allowed 5 \
+  sh-spec spec/xtrace.test.sh --osh-failures-allowed 3 \
     ${REF_SHELLS[@]} $OSH_LIST "$@"
 }
 
@@ -658,7 +658,7 @@ append() {
 
 # associative array -- mksh and zsh implement different associative arrays.
 assoc() {
-  sh-spec spec/assoc.test.sh --osh-failures-allowed 1 \
+  sh-spec spec/assoc.test.sh --osh-failures-allowed 4 \
     $BASH $OSH_LIST "$@"
 }
 
@@ -692,7 +692,7 @@ regex() {
 
 process-sub() {
   # mksh and dash don't support it
-  sh-spec spec/process-sub.test.sh \
+  sh-spec spec/process-sub.test.sh --osh-failures-allowed 0 \
     $BASH $ZSH $OSH_LIST "$@"
 }
 
@@ -707,6 +707,11 @@ extended-glob() {
 extglob-match() {
   sh-spec spec/extglob-match.test.sh \
     $BASH $MKSH $OSH_LIST "$@"
+}
+
+nocasematch-match() {
+  sh-spec spec/nocasematch-match.test.sh --osh-failures-allowed 3 \
+    $BASH $OSH_LIST "$@"
 }
 
 # ${!var} syntax -- oil should replace this with associative arrays.
@@ -740,6 +745,12 @@ empty-bodies() {
 # osh has infinite loop?
 shell-grammar() {
   sh-spec spec/shell-grammar.test.sh $BASH $MKSH $ZSH "$@"
+}
+
+serialize() {
+  # dash doesn't have echo -e, $'', etc.
+  sh-spec spec/serialize.test.sh --osh-failures-allowed 0 \
+    $BASH $MKSH $ZSH $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
 #
@@ -891,7 +902,7 @@ oil-regex() {
 }
 
 oil-func-proc() {
-  sh-spec spec/oil-func-proc.test.sh --osh-failures-allowed 0 \
+  sh-spec spec/oil-func-proc.test.sh --osh-failures-allowed 7 \
     $OSH_LIST "$@"
 }
 
@@ -921,6 +932,11 @@ oil-tuple() {
 oil-interactive() {
   sh-spec spec/oil-interactive.test.sh --osh-failures-allowed 0 \
     $OIL_LIST "$@"
+}
+
+ble-idioms() {
+  sh-spec spec/ble-idioms.test.sh --osh-failures-allowed 0 \
+          $BASH $ZSH $MKSH $BUSYBOX_ASH $OSH_LIST "$@"
 }
 
 "$@"

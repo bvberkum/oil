@@ -25,13 +25,14 @@ from core import state
 
 def ParseAndEval(code_str):
   arena = test_lib.MakeArena('<arith_parse_test.py>')
+  parse_ctx = test_lib.InitParseContext(arena=arena)
   w_parser = test_lib.InitWordParser(code_str, arena=arena)
   w_parser._Next(lex_mode_e.Arith)  # Calling private method
   anode = w_parser._ReadArithExpr()  # need the right lex state?
   print('node:', anode)
 
   mem = state.Mem('', [], arena, [])
-  state.InitMem(mem, {})
+  state.InitMem(mem, {}, '0.1')
   parse_opts, exec_opts, mutable_opts = state.MakeOpts(mem, None)
 
   splitter = split.SplitContext(mem)
@@ -39,7 +40,7 @@ def ParseAndEval(code_str):
 
   word_ev = word_eval.CompletionWordEvaluator(mem, exec_opts, splitter, errfmt)
 
-  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, arena)
+  arith_ev = sh_expr_eval.ArithEvaluator(mem, exec_opts, parse_ctx, arena)
   arith_ev.word_ev = word_ev
   return arith_ev.EvalToInt(anode)
 
@@ -51,13 +52,13 @@ def testEvalExpr(e, expected):
     raise AssertionError('%s => %r, expected %r' % (e, actual, expected))
 
 
-def testSyntaxError(ex):
+def testSyntaxError(expr):
   try:
-    actual = ParseAndEval(ex)
+    actual = ParseAndEval(expr)
   except error.Parse as e:
-    print(ex, '\t\t', e)
+    print(expr, '\t\t', e)
   else:
-    raise AssertionError('Expected parse error: %r, got %r' % (ex, actual))
+    raise AssertionError('Expected parse error: %r, got %r' % (expr, actual))
 
 
 class ArithTest(unittest.TestCase):
